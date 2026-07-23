@@ -12,6 +12,7 @@ grep -q 'EASYTIER_IPV4' <<<"${help_output}"
 grep -q 'DEFAULT_NETWORK_NAME="hostdzire"' "${installer}"
 grep -q 'DEFAULT_PEER="tcp://tcc.933999.xyz:11010"' "${installer}"
 grep -q 'iptables -C INPUT -i tun0' "${installer}"
+[ "$(grep -c '^hostname = "${instance_name}"$' "${installer}")" = "2" ]
 ! grep -q 'DEFAULT_VERSION=' "${installer}"
 grep -q 'EASYTIER_VERSION=${EASYTIER_VERSION:-latest}' "${installer}"
 

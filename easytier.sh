@@ -455,6 +455,7 @@ create_default_config() {
 	instance_name=$(toml_escape "$(hostname)")
 	mkdir -p "$CONFIG_DIR"; umask 077; cat > "$CONFIG_FILE" << EOF
 instance_name = "${instance_name}"
+hostname = "${instance_name}"
 ipv4 = ""
 dhcp = false
 listeners = ["udp://0.0.0.0:11010", "tcp://0.0.0.0:11010", "wg://0.0.0.0:11011", "ws://0.0.0.0:11011/", "wss://0.0.0.0:11012/", "tcp://[::]:11010", "udp://[::]:11010"]
@@ -593,22 +594,43 @@ update_network_config() {
 	return "$result"
 }
 
-update_instance_name() {
-	local temp_file current_name instance_name result
+verify_runtime_hostname() {
+	local expected_name="$1" attempt peer_json runtime_name
+	[ -x "${INSTALL_DIR}/${CLI_BINARY_NAME}" ] || return 0
+	for attempt in 1 2 3 4 5; do
+		peer_json=$("${INSTALL_DIR}/${CLI_BINARY_NAME}" -o json peer 2>/dev/null || true)
+		runtime_name=$(jq -r '[.[] | select(.cost == "Local")][0].hostname // empty' \
+			<<<"$peer_json" 2>/dev/null || true)
+		if [ "$runtime_name" = "$expected_name" ]; then
+			echo -e "${GREEN}运行中的 EasyTier hostname 已更新为：${runtime_name}${NC}"
+			return 0
+		fi
+		sleep 2
+	done
+	echo -e "${RED}配置已写入，但运行中的 hostname 仍为：${runtime_name:-未知}${NC}"
+	echo -e "${YELLOW}请检查服务是否通过 ET_HOSTNAME 或 --hostname 覆盖了配置文件。${NC}"
+	return 1
+}
+
+update_hostname() {
+	local temp_file current_name hostname_value result
 	check_installed || return 1
 	[ -f "$CONFIG_FILE" ] || { echo -e "${YELLOW}配置文件不存在。${NC}"; return 1; }
-	current_name=$(get_top_level_toml_string "instance_name" "$CONFIG_FILE")
+	current_name=$(get_top_level_toml_string "hostname" "$CONFIG_FILE")
 	current_name=${current_name:-$(hostname)}
 	echo "当前服务配置文件: ${CONFIG_FILE}"
-	read -r -p "节点名称/hostname [${current_name}]（留空保持不变）: " instance_name
-	[ -n "$instance_name" ] || { echo "节点名称未修改。"; return 0; }
+	read -r -p "节点名称/hostname [${current_name}]（留空保持不变，最多 32 个字符）: " hostname_value
+	[ -n "$hostname_value" ] || { echo "节点名称未修改。"; return 0; }
+	[ "${#hostname_value}" -le 32 ] || { echo -e "${RED}hostname 不能超过 32 个字符。${NC}"; return 1; }
+	[[ ! "$hostname_value" =~ [[:cntrl:]] ]] || { echo -e "${RED}hostname 不能包含控制字符。${NC}"; return 1; }
 
 	temp_file=$(mktemp)
 	cp -p "$CONFIG_FILE" "$temp_file"
-	set_top_level_toml_value "instance_name" "\"$(toml_escape "$instance_name")\"" "$temp_file"
+	set_top_level_toml_value "hostname" "\"$(toml_escape "$hostname_value")\"" "$temp_file"
 	commit_config_file "$temp_file"; result=$?
 	rm -f "$temp_file"
-	return "$result"
+	[ "$result" -eq 0 ] || return "$result"
+	verify_runtime_hostname "$hostname_value"
 }
 
 show_peer_list() {
@@ -747,7 +769,7 @@ main() {
 			5) if check_installed; then show_config; fi ;;
 			6) if check_installed; then ${INSTALL_DIR}/${CLI_BINARY_NAME} peer; fi ;;
 			7) manage_config ;;
-			8) update_instance_name ;;
+			8) update_hostname ;;
 			9) update_manager_script ;;
 			10) uninstall_easytier ;;
 			0) exit 0 ;;

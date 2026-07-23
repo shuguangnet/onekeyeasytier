@@ -238,6 +238,7 @@ write_config() {
   if [ -n "${EASYTIER_IPV4}" ]; then
     cat > "${CONFIG_FILE}" <<EOF
 instance_name = "${instance_name}"
+hostname = "${instance_name}"
 ipv4 = "${EASYTIER_IPV4}"
 dhcp = false
 listeners = ["tcp://0.0.0.0:${EASYTIER_LISTEN_PORT}", "udp://0.0.0.0:${EASYTIER_LISTEN_PORT}"]
@@ -268,6 +269,7 @@ EOF
   else
     cat > "${CONFIG_FILE}" <<EOF
 instance_name = "${instance_name}"
+hostname = "${instance_name}"
 ipv4 = ""
 dhcp = true
 listeners = ["tcp://0.0.0.0:${EASYTIER_LISTEN_PORT}", "udp://0.0.0.0:${EASYTIER_LISTEN_PORT}"]

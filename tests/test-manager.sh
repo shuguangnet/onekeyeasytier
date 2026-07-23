@@ -80,12 +80,12 @@ mtu = 1380
 EOF
 chmod 0600 "${CONFIG_FILE}"
 
-update_instance_name <<< "macbook-air"
-grep -q '^instance_name = "macbook-air"$' "${CONFIG_FILE}"
-[ "$(get_top_level_toml_string "instance_name" "${CONFIG_FILE}")" = "macbook-air" ]
-instance_line=$(grep -n '^instance_name = ' "${CONFIG_FILE}" | cut -d: -f1)
+update_hostname <<< "macbook-air"
+grep -q '^hostname = "macbook-air"$' "${CONFIG_FILE}"
+[ "$(get_top_level_toml_string "hostname" "${CONFIG_FILE}")" = "macbook-air" ]
+hostname_line=$(grep -n '^hostname = ' "${CONFIG_FILE}" | cut -d: -f1)
 first_section_line=$(grep -n '^\[' "${CONFIG_FILE}" | head -n1 | cut -d: -f1)
-[ "${instance_line}" -lt "${first_section_line}" ]
+[ "${hostname_line}" -lt "${first_section_line}" ]
 
 cp "${CONFIG_FILE}" "${NODE_CONFIG_FILE}"
 cat > "${SERVICE_FILE}" <<EOF
@@ -95,9 +95,9 @@ EOF
 CONFIG_FILE="${DEFAULT_CONFIG_FILE}"
 select_active_config_file
 [ "${CONFIG_FILE}" = "${NODE_CONFIG_FILE}" ]
-update_instance_name <<< "active-node"
-grep -q '^instance_name = "active-node"$' "${NODE_CONFIG_FILE}"
-grep -q '^instance_name = "macbook-air"$' "${DEFAULT_CONFIG_FILE}"
+update_hostname <<< "active-node"
+grep -q '^hostname = "active-node"$' "${NODE_CONFIG_FILE}"
+grep -q '^hostname = "macbook-air"$' "${DEFAULT_CONFIG_FILE}"
 
 escaped_value='name\with"quote'
 set_toml_value "network_name" "\"$(toml_escape "${escaped_value}")\"" "${CONFIG_FILE}"

@@ -40,9 +40,6 @@ bash <(curl -fsSL https://raw.githubusercontent.com/shuguangnet/onekeyeasytier/m
 - 安装 systemd 或 OpenRC 服务，设置开机启动和异常自动重启。
 - 幂等放行 `tun0` 上来自 `10.126.126.0/24` 的入站流量，不开放公网接口。
 - 等待远端 Peer 上线，并输出节点与 Peer 状态。
-- 每分钟在本机刷新结构化资产清单 `/var/lib/easytier-assets/nodes.json` 和可读清单
-  `/var/lib/easytier-assets/NODES.md`，掉线节点会保留并标记为 `offline`。
-- 安装 `easytier-fleet-ssh` Codex Skill 和 `et-ssh` 命令，通过节点别名安全连接。
 
 不要把网络密钥写入公开仓库、URL 或命令行。当前网络密钥曾在聊天中展示过，
 部署前应先在服务端及现有节点统一更换为新的强密钥。
@@ -66,37 +63,6 @@ curl -fsSL https://raw.githubusercontent.com/shuguangnet/onekeyeasytier/main/ins
 其他可覆盖项：`EASYTIER_NETWORK_NAME`、`EASYTIER_PEER`、
 `EASYTIER_LISTEN_PORT`、`EASYTIER_MTU`、`EASYTIER_TRUST_CIDR`。把
 `EASYTIER_TRUST_CIDR` 设置为 `none` 可禁用自动防火墙规则。
-
-### 本地资产和 Agent SSH
-
-每台服务器都独立从 EasyTier Peer 状态生成本地资产，不需要 GitHub Token：
-
-```bash
-et-ssh list
-et-ssh refresh
-```
-
-SSH 默认使用 `root`、端口 `22` 和机器已有的 SSH Agent/默认私钥。安装时可通过
-`EASYTIER_SSH_USER`、`EASYTIER_SSH_PORT`、`EASYTIER_SSH_IDENTITY_FILE` 覆盖。
-脚本不会生成、复制或共享私钥。
-
-首次连接前，必须从云控制台或目标机器上的可信会话取得 Ed25519 指纹：
-
-```bash
-ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
-```
-
-在当前节点核对并信任目标：
-
-```bash
-et-ssh trust steel-cigarette SHA256:可信指纹
-et-ssh connect steel-cigarette
-et-ssh exec steel-cigarette 'systemctl --failed'
-```
-
-Skill 不会使用 `StrictHostKeyChecking=no`，主机指纹变化时会停止连接。每台机器若都
-需要互相 SSH，仍需分别为其现有 SSH 公钥配置目标机器的 `authorized_keys`；资产
-发现不会自动分发私钥或修改 SSH 登录策略。
 
 ## 原有交互式脚本
 

@@ -17,22 +17,15 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Install test dependencies
-        run: sudo apt-get update && sudo apt-get install -y jq
-
       - name: Check shell syntax
         run: |
           bash -n easytier.sh
           bash -n install-easytier-node.sh
           bash -n tests/test-installer.sh
           bash -n tests/test-manager.sh
-          bash -n tests/test-assets.sh
 
       - name: Test installer
         run: bash tests/test-installer.sh
 
       - name: Test configuration manager
         run: bash tests/test-manager.sh
-
-      - name: Test asset inventory
-        run: bash tests/test-assets.sh

@@ -9,11 +9,9 @@ help_output=$(bash "${installer}" --help)
 
 grep -q 'shuguangnet/onekeyeasytier' <<<"${help_output}"
 grep -q 'EASYTIER_IPV4' <<<"${help_output}"
-grep -q 'EASYTIER_CODEX_SKILLS_DIR' <<<"${help_output}"
 grep -q 'DEFAULT_NETWORK_NAME="hostdzire"' "${installer}"
 grep -q 'DEFAULT_PEER="tcp://tcc.933999.xyz:11010"' "${installer}"
 grep -q 'iptables -C INPUT -i tun0' "${installer}"
-grep -q 'install_asset_management' "${installer}"
 
 if grep -Eq 'network secret must contain at least|#EASYTIER_NETWORK_SECRET.*-(ge|gt)' "${installer}"; then
   echo "A network secret length restriction was found." >&2

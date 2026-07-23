@@ -1,5 +1,51 @@
 # onekeyeasytier
 
+## 一条命令加入我的网络
+
+适用于 Debian、Ubuntu、Alpine 等 Linux 节点：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/shuguangnet/onekeyeasytier/main/install-easytier-node.sh | sudo bash
+```
+
+脚本默认连接自建服务节点 `tcp://tcc.933999.xyz:11010`，加入网络 `hostdzire`，
+并通过 EasyTier DHCP 自动获得 `10.126.126.0/24` 网段地址。首次运行会隐藏读取
+网络密钥，并保存到权限为 `0600` 的 `/etc/easytier/network.secret`；以后重复运行
+同一条命令即可更新或修复节点。
+
+安装器会完成：
+
+- 安装固定版本 EasyTier `v2.6.4`，校验 x86_64、aarch64 或 armv7 发布包 SHA256。
+- 生成权限为 `0600` 的节点配置，并在启动前执行 `--check-config`。
+- 安装 systemd 或 OpenRC 服务，设置开机启动和异常自动重启。
+- 幂等放行 `tun0` 上来自 `10.126.126.0/24` 的入站流量，不开放公网接口。
+- 等待远端 Peer 上线，并输出节点与 Peer 状态。
+
+不要把网络密钥写入公开仓库、URL 或命令行。当前网络密钥曾在聊天中展示过，
+部署前应先在服务端及现有节点统一更换为新的强密钥。
+
+### 可选参数
+
+需要静态虚拟 IP：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/shuguangnet/onekeyeasytier/main/install-easytier-node.sh | \
+  sudo EASYTIER_IPV4=10.126.126.20/24 bash
+```
+
+无人值守部署应预先安全放置仅 root 可读的密钥文件：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/shuguangnet/onekeyeasytier/main/install-easytier-node.sh | \
+  sudo EASYTIER_SECRET_FILE=/root/easytier.secret bash
+```
+
+其他可覆盖项：`EASYTIER_NETWORK_NAME`、`EASYTIER_PEER`、
+`EASYTIER_LISTEN_PORT`、`EASYTIER_MTU`、`EASYTIER_TRUST_CIDR`。把
+`EASYTIER_TRUST_CIDR` 设置为 `none` 可禁用自动防火墙规则。
+
+## 原有交互式脚本
+
 一键组网，天下无敌。上面有windows版本，复制了在powershell运行就可以
 
 ![ec9mmBQAWMdMVdkePVvogUYIT4YlodQo.png](https://cdn.nodeimage.com/i/ec9mmBQAWMdMVdkePVvogUYIT4YlodQo.png)

@@ -17,6 +17,9 @@ CONFIG_FILE="${CONFIG_DIR}/easytier.toml"
 CORE_BINARY_NAME="easytier-core"
 CLI_BINARY_NAME="easytier-cli"
 ALIAS_PATH="/usr/local/bin/et"
+MANAGER_INSTALL_DIR="${EASYTIER_MANAGER_INSTALL_DIR:-/usr/local/libexec}"
+MANAGER_INSTALL_PATH="${MANAGER_INSTALL_DIR}/easytier-manager.sh"
+MANAGER_SOURCE_URL="${EASYTIER_MANAGER_SOURCE_URL:-https://raw.githubusercontent.com/shuguangnet/onekeyeasytier/main/easytier.sh}"
 
 # --- 平台特定变量 (将在 main 函数中设置) ---
 OS_TYPE=""
@@ -343,6 +346,48 @@ remove_shortcut() {
 	if [ -L "${ALIAS_PATH}" ]; then rm -f "${ALIAS_PATH}" &>/dev/null; fi
 }
 
+update_manager_script() {
+	local download_file staging_file backup_file
+	download_file=$(mktemp) || return 1
+	trap 'rm -f -- "${download_file}" "${staging_file:-}"' RETURN
+
+	echo -e "${YELLOW}正在从 GitHub 下载最新版管理脚本...${NC}"
+	if ! curl -fL --retry 3 --retry-delay 2 -o "$download_file" "$MANAGER_SOURCE_URL"; then
+		echo -e "${RED}管理脚本下载失败，现有版本未修改。${NC}"
+		return 1
+	fi
+	if ! head -n 1 "$download_file" | grep -Eq '^#!.*(ba)?sh'; then
+		echo -e "${RED}下载内容不是有效的 Shell 脚本，现有版本未修改。${NC}"
+		return 1
+	fi
+	if ! bash -n "$download_file"; then
+		echo -e "${RED}新脚本语法校验失败，现有版本未修改。${NC}"
+		return 1
+	fi
+
+	install -d -m 0755 "$MANAGER_INSTALL_DIR" "$(dirname "$ALIAS_PATH")"
+	if [ -f "$MANAGER_INSTALL_PATH" ] && cmp -s "$download_file" "$MANAGER_INSTALL_PATH"; then
+		ln -sfn "$MANAGER_INSTALL_PATH" "$ALIAS_PATH"
+		echo -e "${GREEN}管理脚本已经是最新版本。${NC}"
+		return 0
+	fi
+
+	staging_file=$(mktemp "${MANAGER_INSTALL_PATH}.new.XXXXXX") || return 1
+	install -m 0755 "$download_file" "$staging_file" || return 1
+	if [ -f "$MANAGER_INSTALL_PATH" ]; then
+		backup_file="${MANAGER_INSTALL_PATH}.bak"
+		cp -p "$MANAGER_INSTALL_PATH" "$backup_file" || return 1
+	fi
+	mv -f "$staging_file" "$MANAGER_INSTALL_PATH" || return 1
+	staging_file=""
+	ln -sfn "$MANAGER_INSTALL_PATH" "$ALIAS_PATH" || return 1
+	echo -e "${GREEN}管理脚本已更新：${MANAGER_INSTALL_PATH}${NC}"
+	[ -n "${backup_file:-}" ] && echo -e "${YELLOW}旧版本备份：${backup_file}${NC}"
+	echo "请重新运行 et 使用新版本。"
+	trap - RETURN
+	rm -f -- "$download_file"
+}
+
 install_easytier() {
 	echo -e "${GREEN}--- 开始安装或更新 EasyTier ---${NC}"
 	local os_identifier="linux"; if [[ "$OS_TYPE" == "macos" ]]; then os_identifier="macos"; fi
@@ -658,10 +703,11 @@ main() {
 		echo " 7. 管理配置与 Peer 节点"
 		echo "-------------------------------------------------------"
 		echo " 8. 修改 EasyTier 节点名称 (hostname)"
-		echo " 9. 卸载 EasyTier"
+		echo " 9. 更新管理脚本"
+		echo "10. 卸载 EasyTier"
 		echo " 0. 退出脚本"
 		echo "======================================================="
-		read -p "请输入选项 [0-9]: " choice
+		read -p "请输入选项 [0-10]: " choice
 		
 		echo
 		
@@ -674,7 +720,8 @@ main() {
 			6) if check_installed; then ${INSTALL_DIR}/${CLI_BINARY_NAME} peer; fi ;;
 			7) manage_config ;;
 			8) update_instance_name ;;
-			9) uninstall_easytier ;;
+			9) update_manager_script ;;
+			10) uninstall_easytier ;;
 			0) exit 0 ;;
 			*) echo -e "${RED}无效输入${NC}" ;;
 		esac

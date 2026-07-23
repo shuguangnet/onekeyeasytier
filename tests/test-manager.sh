@@ -13,7 +13,36 @@ INSTALL_DIR="${temp_dir}/bin"
 CONFIG_DIR="${temp_dir}/etc"
 CONFIG_FILE="${CONFIG_DIR}/easytier.toml"
 SERVICE_FILE="${temp_dir}/easytier.service"
+MANAGER_INSTALL_DIR="${temp_dir}/libexec"
+MANAGER_INSTALL_PATH="${MANAGER_INSTALL_DIR}/easytier-manager.sh"
+ALIAS_PATH="${temp_dir}/bin/et"
 mkdir -p "${INSTALL_DIR}" "${CONFIG_DIR}"
+
+download_source="${temp_dir}/downloaded-manager.sh"
+cp "${manager}" "${download_source}"
+curl() {
+  local output_file=""
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = "-o" ]; then
+      output_file=$2
+      shift 2
+    else
+      shift
+    fi
+  done
+  cp "${download_source}" "${output_file}"
+}
+update_manager_script >/dev/null
+cmp -s "${download_source}" "${MANAGER_INSTALL_PATH}"
+[ "$(readlink "${ALIAS_PATH}")" = "${MANAGER_INSTALL_PATH}" ]
+[ -x "${MANAGER_INSTALL_PATH}" ]
+cp "${MANAGER_INSTALL_PATH}" "${temp_dir}/installed-manager.sh"
+printf '<html>download failed</html>\n' > "${download_source}"
+if update_manager_script >/dev/null 2>&1; then
+  echo "Invalid manager download was unexpectedly installed." >&2
+  exit 1
+fi
+cmp -s "${temp_dir}/installed-manager.sh" "${MANAGER_INSTALL_PATH}"
 
 cat > "${INSTALL_DIR}/${CORE_BINARY_NAME}" <<'EOF'
 #!/usr/bin/env bash

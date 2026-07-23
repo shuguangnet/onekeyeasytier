@@ -7,7 +7,19 @@
 ```bash
 curl -fsSL https://raw.githubusercontent.com/shuguangnet/onekeyeasytier/main/install-easytier-node.sh | sudo bash
 ```
+适用于 Macos
+```bash
+curl -fsSL \
+  https://raw.githubusercontent.com/ceocok/c.cococ/refs/heads/main/easytier.sh \
+  -o /tmp/easytier-manager.sh
 
+sudo mkdir -p /usr/local/libexec
+sudo install -m 755 \
+  /tmp/easytier-manager.sh \
+  /usr/local/libexec/easytier-manager.sh
+
+sudo bash /usr/local/libexec/easytier-manager.sh
+```
 脚本默认连接自建服务节点 `tcp://tcc.933999.xyz:11010`，加入网络 `hostdzire`，
 并通过 EasyTier DHCP 自动获得 `10.126.126.0/24` 网段地址。首次运行会隐藏读取
 网络密钥，并保存到权限为 `0600` 的 `/etc/easytier/network.secret`；以后重复运行

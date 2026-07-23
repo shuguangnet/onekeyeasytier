@@ -7,10 +7,11 @@
 ```bash
 curl -fsSL https://raw.githubusercontent.com/shuguangnet/onekeyeasytier/main/install-easytier-node.sh | sudo bash
 ```
-适用于 Macos
+适用于 macOS，安装管理脚本后可直接运行 `et`：
+
 ```bash
 curl -fsSL \
-  https://raw.githubusercontent.com/ceocok/c.cococ/refs/heads/main/easytier.sh \
+  https://raw.githubusercontent.com/shuguangnet/onekeyeasytier/main/easytier.sh \
   -o /tmp/easytier-manager.sh
 
 sudo mkdir -p /usr/local/libexec
@@ -19,6 +20,12 @@ sudo install -m 755 \
   /usr/local/libexec/easytier-manager.sh
 
 sudo bash /usr/local/libexec/easytier-manager.sh
+```
+
+Linux、Alpine 也可以使用同一个交互式管理器：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/shuguangnet/onekeyeasytier/main/easytier.sh)
 ```
 脚本默认连接自建服务节点 `tcp://tcc.933999.xyz:11010`，加入网络 `hostdzire`，
 并通过 EasyTier DHCP 自动获得 `10.126.126.0/24` 网段地址。首次运行会隐藏读取
@@ -96,7 +103,7 @@ Skill 不会使用 `StrictHostKeyChecking=no`，主机指纹变化时会停止�
 
 ![ec9mmBQAWMdMVdkePVvogUYIT4YlodQo.png](https://cdn.nodeimage.com/i/ec9mmBQAWMdMVdkePVvogUYIT4YlodQo.png)
 ```
-bash <(curl -sL https://raw.githubusercontent.com/ceocok/c.cococ/refs/heads/main/easytier.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/shuguangnet/onekeyeasytier/main/easytier.sh)
 ```
 - ✨ 这个脚本凭什么被称为“宇宙无敌好用”？
 - 🖥️ 全平台制霸
@@ -112,6 +119,8 @@ bash <(curl -sL https://raw.githubusercontent.com/ceocok/c.cococ/refs/heads/main
 - 部署/加入网络: 引导式配置，告别手动编辑 toml 文件的烦恼。
 - 服务管理: 轻松实现启动、停止、重启、查看状态、设置/取消开机自启。
 - 配置/节点查看: 快速预览当前配置文件和网络节点信息。
+- 配置更新: 修改网络名称、网络密钥、静态 IP 或 DHCP，校验通过后自动备份并重启服务。
+- Peer 节点管理: 可新增、修改或删除指定 Peer 配置；删除整个配置前会二次确认并保留备份。
 - 一键卸载: 干净、彻底，不留任何残余。
 - 🧠 超乎想象的智能化
 - 脚本内置了大量自动化逻辑，让你“只做选择，不干杂活”：

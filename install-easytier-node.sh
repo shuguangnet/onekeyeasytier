@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly DEFAULT_VERSION="v2.6.4"
 readonly DEFAULT_NETWORK_NAME="hostdzire"
 readonly DEFAULT_PEER="tcp://tcc.933999.xyz:11010"
 readonly DEFAULT_LISTEN_PORT="11010"
 readonly DEFAULT_MTU="1380"
+readonly GITHUB_RELEASES_API="https://api.github.com/repos/EasyTier/EasyTier/releases"
 readonly INSTALL_DIR="/usr/local/bin"
 readonly CONFIG_DIR="/etc/easytier"
 readonly CONFIG_FILE="${CONFIG_DIR}/node.toml"
@@ -13,7 +13,7 @@ readonly SECRET_FILE_DEFAULT="${CONFIG_DIR}/network.secret"
 readonly SERVICE_NAME="easytier"
 readonly FIREWALL_HELPER="/usr/local/sbin/easytier-overlay-firewall"
 
-EASYTIER_VERSION=${EASYTIER_VERSION:-${DEFAULT_VERSION}}
+EASYTIER_VERSION=${EASYTIER_VERSION:-latest}
 EASYTIER_NETWORK_NAME=${EASYTIER_NETWORK_NAME:-${DEFAULT_NETWORK_NAME}}
 EASYTIER_PEER=${EASYTIER_PEER:-${DEFAULT_PEER}}
 EASYTIER_IPV4=${EASYTIER_IPV4:-}
@@ -23,6 +23,10 @@ EASYTIER_TRUST_CIDR=${EASYTIER_TRUST_CIDR:-10.126.126.0/24}
 EASYTIER_SECRET_FILE=${EASYTIER_SECRET_FILE:-${SECRET_FILE_DEFAULT}}
 EASYTIER_SHA256=${EASYTIER_SHA256:-}
 EASYTIER_NETWORK_SECRET=${EASYTIER_NETWORK_SECRET:-}
+RELEASE_VERSION=""
+RELEASE_ARCHIVE_NAME=""
+RELEASE_DOWNLOAD_URL=""
+RELEASE_SHA256=""
 
 usage() {
   cat <<'EOF'
@@ -44,8 +48,8 @@ Optional environment variables:
   EASYTIER_IPV4           Static overlay address, for example 10.126.126.20/24.
                           Leave empty to use EasyTier DHCP (the default).
   EASYTIER_SECRET_FILE    Read/save the secret at another root-only path.
-  EASYTIER_VERSION        Override the pinned release version.
-  EASYTIER_SHA256         Required when overriding the pinned version.
+  EASYTIER_VERSION        Install a specific release tag instead of latest.
+  EASYTIER_SHA256         Optional expected SHA256 for the selected archive.
   EASYTIER_LISTEN_PORT    Local EasyTier TCP/UDP listener port.
   EASYTIER_MTU            Overlay MTU (default 1380).
   EASYTIER_TRUST_CIDR     Allow inbound tun0 traffic from this overlay CIDR.
@@ -87,7 +91,9 @@ validate_settings() {
   ((EASYTIER_LISTEN_PORT >= 1 && EASYTIER_LISTEN_PORT <= 65535)) || fail "listener port is out of range"
   [[ "${EASYTIER_MTU}" =~ ^[0-9]+$ ]] || fail "MTU must be numeric"
   ((EASYTIER_MTU >= 576 && EASYTIER_MTU <= 9000)) || fail "MTU is out of range"
-  [[ "${EASYTIER_VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][A-Za-z0-9.]+)?$ ]] || fail "invalid EasyTier version"
+  if [ "${EASYTIER_VERSION}" != "latest" ]; then
+    [[ "${EASYTIER_VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][A-Za-z0-9.]+)?$ ]] || fail "invalid EasyTier version"
+  fi
   if [ -n "${EASYTIER_SHA256}" ]; then
     [[ "${EASYTIER_SHA256}" =~ ^[a-fA-F0-9]{64}$ ]] || fail "EASYTIER_SHA256 must contain 64 hexadecimal characters"
   fi
@@ -102,7 +108,7 @@ validate_settings() {
 install_dependencies() {
   local missing=()
   local command_name
-  for command_name in curl unzip sha256sum install; do
+  for command_name in curl jq unzip sha256sum install; do
     command -v "${command_name}" >/dev/null 2>&1 || missing+=("${command_name}")
   done
   [ "${#missing[@]}" -eq 0 ] && return
@@ -110,15 +116,15 @@ install_dependencies() {
   log "installing required packages"
   if command -v apt-get >/dev/null 2>&1; then
     apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl unzip coreutils
+    DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl jq unzip coreutils
   elif command -v apk >/dev/null 2>&1; then
-    apk add --no-cache ca-certificates curl unzip coreutils
+    apk add --no-cache ca-certificates curl jq unzip coreutils
   elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y ca-certificates curl unzip coreutils
+    dnf install -y ca-certificates curl jq unzip coreutils
   elif command -v yum >/dev/null 2>&1; then
-    yum install -y ca-certificates curl unzip coreutils
+    yum install -y ca-certificates curl jq unzip coreutils
   else
-    fail "install curl, unzip, coreutils, and CA certificates manually"
+    fail "install curl, jq, unzip, coreutils, and CA certificates manually"
   fi
 }
 
@@ -131,19 +137,40 @@ release_arch() {
   esac
 }
 
-pinned_sha256() {
+resolve_release() {
   local arch=$1
-  if [ "${EASYTIER_VERSION}" != "${DEFAULT_VERSION}" ]; then
-    [ -n "${EASYTIER_SHA256}" ] || fail "set EASYTIER_SHA256 when overriding EASYTIER_VERSION"
-    echo "${EASYTIER_SHA256}"
-    return
+  local release_url release_json asset_json official_digest
+
+  if [ "${EASYTIER_VERSION}" = "latest" ]; then
+    release_url="${GITHUB_RELEASES_API}/latest"
+  else
+    release_url="${GITHUB_RELEASES_API}/tags/${EASYTIER_VERSION}"
   fi
 
-  case "${arch}" in
-    x86_64) echo "61b659eaedba658fa66fe47d17e1426cdd77e5d02fa15fed447bb4357c09dfd6" ;;
-    aarch64) echo "f533ec25a7ea714e09f645615012200278058525795cc3bb690ff011aec1a70f" ;;
-    armv7) echo "93b1d2831e45db1fd3ca1d8d68c191b300bd69d331ca1858394a0cf884363cc3" ;;
-  esac
+  log "resolving EasyTier ${EASYTIER_VERSION} release"
+  release_json=$(curl -fsSL --retry 3 --retry-delay 2 \
+    -H "Accept: application/vnd.github+json" \
+    -H "X-GitHub-Api-Version: 2022-11-28" \
+    "${release_url}") || fail "unable to query EasyTier release metadata"
+
+  RELEASE_VERSION=$(jq -er '.tag_name | select(type == "string")' <<<"${release_json}") || \
+    fail "release metadata does not contain a tag"
+  [[ "${RELEASE_VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][A-Za-z0-9.]+)?$ ]] || \
+    fail "release returned an invalid tag: ${RELEASE_VERSION}"
+  RELEASE_ARCHIVE_NAME="easytier-linux-${arch}-${RELEASE_VERSION}.zip"
+  asset_json=$(jq -cer --arg name "${RELEASE_ARCHIVE_NAME}" \
+    '[.assets[] | select(.name == $name)] | if length == 1 then .[0] else empty end' \
+    <<<"${release_json}") || fail "release does not contain ${RELEASE_ARCHIVE_NAME}"
+  RELEASE_DOWNLOAD_URL=$(jq -er '.browser_download_url | select(type == "string")' <<<"${asset_json}") || \
+    fail "release asset does not contain a download URL"
+  official_digest=$(jq -er '.digest | select(type == "string" and startswith("sha256:"))' \
+    <<<"${asset_json}") || fail "release asset does not contain a SHA256 digest"
+  RELEASE_SHA256=${official_digest#sha256:}
+  [[ "${RELEASE_SHA256}" =~ ^[a-fA-F0-9]{64}$ ]] || fail "release asset contains an invalid SHA256 digest"
+
+  if [ -n "${EASYTIER_SHA256}" ] && [ "${EASYTIER_SHA256,,}" != "${RELEASE_SHA256,,}" ]; then
+    fail "EASYTIER_SHA256 does not match the digest published by GitHub"
+  fi
 }
 
 read_network_secret() {
@@ -180,17 +207,14 @@ toml_escape() {
 
 install_release() {
   local arch=$1
-  local expected_sha=$2
-  local archive_name="easytier-linux-${arch}-${EASYTIER_VERSION}.zip"
-  local download_url="https://github.com/EasyTier/EasyTier/releases/download/${EASYTIER_VERSION}/${archive_name}"
   local temp_dir
   temp_dir=$(mktemp -d /tmp/easytier-node.XXXXXX)
   trap 'rm -rf -- "${temp_dir}"' RETURN
 
-  log "downloading EasyTier ${EASYTIER_VERSION} for ${arch}"
-  curl -fL --retry 3 --retry-delay 2 -o "${temp_dir}/${archive_name}" "${download_url}"
-  printf '%s  %s\n' "${expected_sha}" "${temp_dir}/${archive_name}" | sha256sum -c -
-  unzip -q "${temp_dir}/${archive_name}" -d "${temp_dir}/extract"
+  log "downloading EasyTier ${RELEASE_VERSION} for ${arch}"
+  curl -fL --retry 3 --retry-delay 2 -o "${temp_dir}/${RELEASE_ARCHIVE_NAME}" "${RELEASE_DOWNLOAD_URL}"
+  printf '%s  %s\n' "${RELEASE_SHA256}" "${temp_dir}/${RELEASE_ARCHIVE_NAME}" | sha256sum -c -
+  unzip -q "${temp_dir}/${RELEASE_ARCHIVE_NAME}" -d "${temp_dir}/extract"
 
   local release_dir="${temp_dir}/extract/easytier-linux-${arch}"
   [ -x "${release_dir}/easytier-core" ] || fail "release does not contain easytier-core"
@@ -384,14 +408,16 @@ main() {
   install_dependencies
   read_network_secret
 
-  local arch expected_sha
+  local arch
   arch=$(release_arch)
-  expected_sha=$(pinned_sha256 "${arch}")
-  install_release "${arch}" "${expected_sha}"
+  resolve_release "${arch}"
+  install_release "${arch}"
   write_config
   install_firewall_helper
   install_service
   verify_node
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

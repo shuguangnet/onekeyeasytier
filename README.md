@@ -35,7 +35,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/shuguangnet/onekeyeasytier/m
 
 安装器会完成：
 
-- 安装固定版本 EasyTier `v2.6.4`，校验 x86_64、aarch64 或 armv7 发布包 SHA256。
+- 自动安装 GitHub Releases 中最新的 EasyTier 稳定版，并校验发布包的官方 SHA256 digest。
 - 生成权限为 `0600` 的节点配置，并在启动前执行 `--check-config`。
 - 安装 systemd 或 OpenRC 服务，设置开机启动和异常自动重启。
 - 幂等放行 `tun0` 上来自 `10.126.126.0/24` 的入站流量，不开放公网接口。
@@ -61,7 +61,8 @@ curl -fsSL https://raw.githubusercontent.com/shuguangnet/onekeyeasytier/main/ins
 ```
 
 其他可覆盖项：`EASYTIER_NETWORK_NAME`、`EASYTIER_PEER`、
-`EASYTIER_LISTEN_PORT`、`EASYTIER_MTU`、`EASYTIER_TRUST_CIDR`。把
+`EASYTIER_VERSION`、`EASYTIER_SHA256`、`EASYTIER_LISTEN_PORT`、
+`EASYTIER_MTU`、`EASYTIER_TRUST_CIDR`。把
 `EASYTIER_TRUST_CIDR` 设置为 `none` 可禁用自动防火墙规则。
 
 ## 原有交互式脚本

@@ -49,6 +49,13 @@ mtu = 1380
 EOF
 chmod 0600 "${CONFIG_FILE}"
 
+update_instance_name <<< "macbook-air"
+grep -q '^instance_name = "macbook-air"$' "${CONFIG_FILE}"
+[ "$(get_top_level_toml_string "instance_name" "${CONFIG_FILE}")" = "macbook-air" ]
+instance_line=$(grep -n '^instance_name = ' "${CONFIG_FILE}" | cut -d: -f1)
+first_section_line=$(grep -n '^\[' "${CONFIG_FILE}" | head -n1 | cut -d: -f1)
+[ "${instance_line}" -lt "${first_section_line}" ]
+
 escaped_value='name\with"quote'
 set_toml_value "network_name" "\"$(toml_escape "${escaped_value}")\"" "${CONFIG_FILE}"
 grep -Fq 'network_name = "name\\with\"quote"' "${CONFIG_FILE}"

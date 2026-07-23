@@ -91,6 +91,31 @@ set_toml_value() {
 	mv "$temp_file" "$file"
 }
 
+set_top_level_toml_value() {
+	local key="$1" value="$2" file="$3" temp_file
+	temp_file=$(mktemp)
+	EASYTIER_TOML_VALUE="$value" awk -v key="$key" '
+		BEGIN { in_top_level = 1; updated = 0 }
+		in_top_level && $0 ~ "^[[:space:]#]*" key "[[:space:]]*=" && !updated {
+			print key " = " ENVIRON["EASYTIER_TOML_VALUE"]
+			updated = 1
+			next
+		}
+		in_top_level && /^[[:space:]]*\[/ {
+			if (!updated) {
+				print key " = " ENVIRON["EASYTIER_TOML_VALUE"]
+				updated = 1
+			}
+			in_top_level = 0
+		}
+		{ print }
+		END {
+			if (!updated) print key " = " ENVIRON["EASYTIER_TOML_VALUE"]
+		}
+	' "$file" > "$temp_file" || { rm -f "$temp_file"; return 1; }
+	mv "$temp_file" "$file"
+}
+
 toml_escape() {
 	local value="$1"
 	value=${value//\\/\\\\}
@@ -101,6 +126,20 @@ toml_escape() {
 get_toml_string() {
 	local key="$1" file="$2"
 	awk -v key="$key" '
+		$0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+			line = $0
+			sub(/^[^=]*=[[:space:]]*"/, "", line)
+			sub(/"[[:space:]]*$/, "", line)
+			print line
+			exit
+		}
+	' "$file"
+}
+
+get_top_level_toml_string() {
+	local key="$1" file="$2"
+	awk -v key="$key" '
+		/^[[:space:]]*\[/ { exit }
 		$0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
 			line = $0
 			sub(/^[^=]*=[[:space:]]*"/, "", line)
@@ -340,7 +379,11 @@ install_easytier() {
 	fi
 }
 
-create_default_config() { mkdir -p "$CONFIG_DIR"; umask 077; cat > "$CONFIG_FILE" << 'EOF'
+create_default_config() {
+	local instance_name
+	instance_name=$(toml_escape "$(hostname)")
+	mkdir -p "$CONFIG_DIR"; umask 077; cat > "$CONFIG_FILE" << EOF
+instance_name = "${instance_name}"
 ipv4 = ""
 dhcp = false
 listeners = ["udp://0.0.0.0:11010", "tcp://0.0.0.0:11010", "wg://0.0.0.0:11011", "ws://0.0.0.0:11011/", "wss://0.0.0.0:11012/", "tcp://[::]:11010", "udp://[::]:11010"]
@@ -364,7 +407,8 @@ disable_udp_hole_punching = false
 enableKcp_Proxy = true
 EOF
 	if [ $? -eq 0 ]; then chmod 600 "$CONFIG_FILE"; echo "已成功创建默认配置文件: ${CONFIG_FILE}"; return 0;
-	else echo -e "${RED}错误: 创建配置文件失败!${NC}"; return 1; fi; }
+	else echo -e "${RED}错误: 创建配置文件失败!${NC}"; return 1; fi
+}
 
 deploy_new_network() { 
 	check_installed || return 1
@@ -474,6 +518,23 @@ update_network_config() {
 	fi
 	commit_config_file "$temp_file"
 	local result=$?
+	rm -f "$temp_file"
+	return "$result"
+}
+
+update_instance_name() {
+	local temp_file current_name instance_name result
+	check_installed || return 1
+	[ -f "$CONFIG_FILE" ] || { echo -e "${YELLOW}配置文件不存在。${NC}"; return 1; }
+	current_name=$(get_top_level_toml_string "instance_name" "$CONFIG_FILE")
+	current_name=${current_name:-$(hostname)}
+	read -r -p "节点名称/hostname [${current_name}]（留空保持不变）: " instance_name
+	[ -n "$instance_name" ] || { echo "节点名称未修改。"; return 0; }
+
+	temp_file=$(mktemp)
+	cp -p "$CONFIG_FILE" "$temp_file"
+	set_top_level_toml_value "instance_name" "\"$(toml_escape "$instance_name")\"" "$temp_file"
+	commit_config_file "$temp_file"; result=$?
 	rm -f "$temp_file"
 	return "$result"
 }
@@ -596,10 +657,11 @@ main() {
 		echo " 6. 查看EasyTier网络节点"
 		echo " 7. 管理配置与 Peer 节点"
 		echo "-------------------------------------------------------"
-		echo " 8. 卸载 EasyTier"
+		echo " 8. 修改 EasyTier 节点名称 (hostname)"
+		echo " 9. 卸载 EasyTier"
 		echo " 0. 退出脚本"
 		echo "======================================================="
-		read -p "请输入选项 [0-8]: " choice
+		read -p "请输入选项 [0-9]: " choice
 		
 		echo
 		
@@ -611,7 +673,8 @@ main() {
 			5) if check_installed; then show_config; fi ;;
 			6) if check_installed; then ${INSTALL_DIR}/${CLI_BINARY_NAME} peer; fi ;;
 			7) manage_config ;;
-			8) uninstall_easytier ;;
+			8) update_instance_name ;;
+			9) uninstall_easytier ;;
 			0) exit 0 ;;
 			*) echo -e "${RED}无效输入${NC}" ;;
 		esac

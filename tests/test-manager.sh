@@ -11,7 +11,9 @@ source "${manager}"
 
 INSTALL_DIR="${temp_dir}/bin"
 CONFIG_DIR="${temp_dir}/etc"
-CONFIG_FILE="${CONFIG_DIR}/easytier.toml"
+DEFAULT_CONFIG_FILE="${CONFIG_DIR}/easytier.toml"
+NODE_CONFIG_FILE="${CONFIG_DIR}/node.toml"
+CONFIG_FILE="${DEFAULT_CONFIG_FILE}"
 SERVICE_FILE="${temp_dir}/easytier.service"
 MANAGER_INSTALL_DIR="${temp_dir}/libexec"
 MANAGER_INSTALL_PATH="${MANAGER_INSTALL_DIR}/easytier-manager.sh"
@@ -84,6 +86,18 @@ grep -q '^instance_name = "macbook-air"$' "${CONFIG_FILE}"
 instance_line=$(grep -n '^instance_name = ' "${CONFIG_FILE}" | cut -d: -f1)
 first_section_line=$(grep -n '^\[' "${CONFIG_FILE}" | head -n1 | cut -d: -f1)
 [ "${instance_line}" -lt "${first_section_line}" ]
+
+cp "${CONFIG_FILE}" "${NODE_CONFIG_FILE}"
+cat > "${SERVICE_FILE}" <<EOF
+[Service]
+ExecStart=${INSTALL_DIR}/${CORE_BINARY_NAME} -c ${NODE_CONFIG_FILE}
+EOF
+CONFIG_FILE="${DEFAULT_CONFIG_FILE}"
+select_active_config_file
+[ "${CONFIG_FILE}" = "${NODE_CONFIG_FILE}" ]
+update_instance_name <<< "active-node"
+grep -q '^instance_name = "active-node"$' "${NODE_CONFIG_FILE}"
+grep -q '^instance_name = "macbook-air"$' "${DEFAULT_CONFIG_FILE}"
 
 escaped_value='name\with"quote'
 set_toml_value "network_name" "\"$(toml_escape "${escaped_value}")\"" "${CONFIG_FILE}"

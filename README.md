@@ -88,7 +88,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/shuguangnet/onekeyeasytier/m
 - 服务管理: 轻松实现启动、停止、重启、查看状态、设置/取消开机自启。
 - 配置/节点查看: 快速预览当前配置文件和网络节点信息。
 - 配置更新: 修改网络名称、网络密钥、静态 IP 或 DHCP，校验通过后自动备份并重启服务。
-- 节点名称: 主菜单提供独立选项修改 EasyTier 显示的 hostname，校验通过后自动重启生效。
+- 节点名称: 主菜单提供独立选项修改 EasyTier 显示的 hostname，并自动识别服务实际使用的 `node.toml` 或 `easytier.toml`，校验通过后重启生效。
 - 脚本更新: 主菜单可从 GitHub 更新管理脚本，语法校验通过后原子替换并保留旧版本备份。
 - Peer 节点管理: 可新增、修改或删除指定 Peer 配置；删除整个配置前会二次确认并保留备份。
 - 一键卸载: 干净、彻底，不留任何残余。

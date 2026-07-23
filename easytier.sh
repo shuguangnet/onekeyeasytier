@@ -13,7 +13,9 @@ NC="\033[0m"
 # --- 平台无关路径和文件名 ---
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/easytier"
-CONFIG_FILE="${CONFIG_DIR}/easytier.toml"
+DEFAULT_CONFIG_FILE="${CONFIG_DIR}/easytier.toml"
+NODE_CONFIG_FILE="${CONFIG_DIR}/node.toml"
+CONFIG_FILE="${EASYTIER_CONFIG_FILE:-${DEFAULT_CONFIG_FILE}}"
 CORE_BINARY_NAME="easytier-core"
 CLI_BINARY_NAME="easytier-cli"
 ALIAS_PATH="/usr/local/bin/et"
@@ -76,6 +78,30 @@ check_installed() {
 	if [ ! -f "${INSTALL_DIR}/${CORE_BINARY_NAME}" ]; then
 		echo -e "${YELLOW}EasyTier 尚未安装。请先选择选项 1。${NC}"; return 1
 	fi; return 0
+}
+
+select_active_config_file() {
+	if [ -n "${EASYTIER_CONFIG_FILE:-}" ]; then
+		CONFIG_FILE="$EASYTIER_CONFIG_FILE"
+		return 0
+	fi
+	if [ -f "$SERVICE_FILE" ]; then
+		if [ -f "$NODE_CONFIG_FILE" ] && grep -Fq -- "$NODE_CONFIG_FILE" "$SERVICE_FILE"; then
+			CONFIG_FILE="$NODE_CONFIG_FILE"
+			return 0
+		fi
+		if [ -f "$DEFAULT_CONFIG_FILE" ] && grep -Fq -- "$DEFAULT_CONFIG_FILE" "$SERVICE_FILE"; then
+			CONFIG_FILE="$DEFAULT_CONFIG_FILE"
+			return 0
+		fi
+	fi
+	if [ -f "$DEFAULT_CONFIG_FILE" ]; then
+		CONFIG_FILE="$DEFAULT_CONFIG_FILE"
+	elif [ -f "$NODE_CONFIG_FILE" ]; then
+		CONFIG_FILE="$NODE_CONFIG_FILE"
+	else
+		CONFIG_FILE="$DEFAULT_CONFIG_FILE"
+	fi
 }
 
 set_toml_value() {
@@ -573,6 +599,7 @@ update_instance_name() {
 	[ -f "$CONFIG_FILE" ] || { echo -e "${YELLOW}配置文件不存在。${NC}"; return 1; }
 	current_name=$(get_top_level_toml_string "instance_name" "$CONFIG_FILE")
 	current_name=${current_name:-$(hostname)}
+	echo "当前服务配置文件: ${CONFIG_FILE}"
 	read -r -p "节点名称/hostname [${current_name}]（留空保持不变）: " instance_name
 	[ -n "$instance_name" ] || { echo "节点名称未修改。"; return 0; }
 
@@ -687,6 +714,7 @@ main() {
 		Darwin) OS_TYPE="macos"; SERVICE_FILE="/Library/LaunchDaemons/${SERVICE_LABEL}.plist"; ;;
 		*) echo -e "${RED}错误: 不支持的操作系统: $(uname)${NC}"; exit 1 ;;
 	esac
+	select_active_config_file
 	check_root; check_dependencies
 	while true; do
 		clear

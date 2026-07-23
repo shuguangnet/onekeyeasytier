@@ -12,6 +12,11 @@ readonly CONFIG_FILE="${CONFIG_DIR}/node.toml"
 readonly SECRET_FILE_DEFAULT="${CONFIG_DIR}/network.secret"
 readonly SERVICE_NAME="easytier"
 readonly FIREWALL_HELPER="/usr/local/sbin/easytier-overlay-firewall"
+readonly ASSET_BASE_URL="https://raw.githubusercontent.com/shuguangnet/onekeyeasytier/main/skills/easytier-fleet-ssh"
+readonly ASSET_CONFIG_DIR="/etc/easytier-assets"
+readonly ASSET_DATA_DIR="/var/lib/easytier-assets"
+readonly ASSET_REFRESH_BIN="/usr/local/sbin/easytier-assets-refresh"
+readonly ASSET_SSH_BIN="/usr/local/bin/et-ssh"
 
 EASYTIER_VERSION=${EASYTIER_VERSION:-${DEFAULT_VERSION}}
 EASYTIER_NETWORK_NAME=${EASYTIER_NETWORK_NAME:-${DEFAULT_NETWORK_NAME}}
@@ -23,6 +28,10 @@ EASYTIER_TRUST_CIDR=${EASYTIER_TRUST_CIDR:-10.126.126.0/24}
 EASYTIER_SECRET_FILE=${EASYTIER_SECRET_FILE:-${SECRET_FILE_DEFAULT}}
 EASYTIER_SHA256=${EASYTIER_SHA256:-}
 EASYTIER_NETWORK_SECRET=${EASYTIER_NETWORK_SECRET:-}
+EASYTIER_SSH_USER=${EASYTIER_SSH_USER:-root}
+EASYTIER_SSH_PORT=${EASYTIER_SSH_PORT:-22}
+EASYTIER_SSH_IDENTITY_FILE=${EASYTIER_SSH_IDENTITY_FILE:-}
+EASYTIER_CODEX_SKILLS_DIR=${EASYTIER_CODEX_SKILLS_DIR:-/root/.codex/skills}
 
 usage() {
   cat <<'EOF'
@@ -50,6 +59,12 @@ Optional environment variables:
   EASYTIER_MTU            Overlay MTU (default 1380).
   EASYTIER_TRUST_CIDR     Allow inbound tun0 traffic from this overlay CIDR.
                           Default: 10.126.126.0/24. Set to "none" to disable.
+  EASYTIER_SSH_USER       Default SSH user stored in the local asset inventory.
+  EASYTIER_SSH_PORT       Default SSH port (default 22).
+  EASYTIER_SSH_IDENTITY_FILE
+                          Optional existing private-key path; the installer never creates or copies one.
+  EASYTIER_CODEX_SKILLS_DIR
+                          Codex skill directory (default /root/.codex/skills).
 
 Non-interactive example with an existing root-only secret file:
   curl -fsSL https://raw.githubusercontent.com/shuguangnet/onekeyeasytier/main/install-easytier-node.sh | \
@@ -97,12 +112,19 @@ validate_settings() {
   if [ "${EASYTIER_TRUST_CIDR}" != "none" ]; then
     [[ "${EASYTIER_TRUST_CIDR}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$ ]] || fail "EASYTIER_TRUST_CIDR must use IPv4/CIDR notation or be none"
   fi
+  [[ "${EASYTIER_SSH_USER}" =~ ^[A-Za-z_][A-Za-z0-9_-]*$ ]] || fail "invalid EASYTIER_SSH_USER"
+  [[ "${EASYTIER_SSH_PORT}" =~ ^[0-9]+$ ]] || fail "EASYTIER_SSH_PORT must be numeric"
+  ((EASYTIER_SSH_PORT >= 1 && EASYTIER_SSH_PORT <= 65535)) || fail "EASYTIER_SSH_PORT is out of range"
+  if [ -n "${EASYTIER_SSH_IDENTITY_FILE}" ]; then
+    [[ "${EASYTIER_SSH_IDENTITY_FILE}" == /* ]] || fail "EASYTIER_SSH_IDENTITY_FILE must be an absolute path"
+  fi
+  [[ "${EASYTIER_CODEX_SKILLS_DIR}" == /* ]] || fail "EASYTIER_CODEX_SKILLS_DIR must be an absolute path"
 }
 
 install_dependencies() {
   local missing=()
   local command_name
-  for command_name in curl unzip sha256sum install; do
+  for command_name in curl unzip sha256sum install jq ssh ssh-keygen ssh-keyscan; do
     command -v "${command_name}" >/dev/null 2>&1 || missing+=("${command_name}")
   done
   [ "${#missing[@]}" -eq 0 ] && return
@@ -110,15 +132,15 @@ install_dependencies() {
   log "installing required packages"
   if command -v apt-get >/dev/null 2>&1; then
     apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl unzip coreutils
+    DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl unzip coreutils jq openssh-client
   elif command -v apk >/dev/null 2>&1; then
-    apk add --no-cache ca-certificates curl unzip coreutils
+    apk add --no-cache ca-certificates curl unzip coreutils jq openssh-client
   elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y ca-certificates curl unzip coreutils
+    dnf install -y ca-certificates curl unzip coreutils jq openssh-clients
   elif command -v yum >/dev/null 2>&1; then
-    yum install -y ca-certificates curl unzip coreutils
+    yum install -y ca-certificates curl unzip coreutils jq openssh-clients
   else
-    fail "install curl, unzip, coreutils, and CA certificates manually"
+    fail "install curl, unzip, coreutils, jq, OpenSSH client, and CA certificates manually"
   fi
 }
 
@@ -300,6 +322,97 @@ EOF
   chmod 0755 "${FIREWALL_HELPER}"
 }
 
+install_asset_management() {
+  local temp_dir skill_dir config_identity
+  temp_dir=$(mktemp -d /tmp/easytier-assets.XXXXXX)
+  trap 'rm -rf -- "${temp_dir}"' RETURN
+
+  log "installing local EasyTier asset inventory and Codex SSH skill"
+  curl -fL --retry 3 -o "${temp_dir}/refresh-assets.sh" "${ASSET_BASE_URL}/scripts/refresh-assets.sh"
+  curl -fL --retry 3 -o "${temp_dir}/et-ssh" "${ASSET_BASE_URL}/scripts/et-ssh"
+  curl -fL --retry 3 -o "${temp_dir}/SKILL.md" "${ASSET_BASE_URL}/SKILL.md"
+  curl -fL --retry 3 -o "${temp_dir}/openai.yaml" "${ASSET_BASE_URL}/agents/openai.yaml"
+  bash -n "${temp_dir}/refresh-assets.sh"
+  bash -n "${temp_dir}/et-ssh"
+
+  install -d -m 0700 "${ASSET_CONFIG_DIR}" "${ASSET_DATA_DIR}"
+  install -m 0755 "${temp_dir}/refresh-assets.sh" "${ASSET_REFRESH_BIN}"
+  install -m 0755 "${temp_dir}/et-ssh" "${ASSET_SSH_BIN}"
+  touch "${ASSET_CONFIG_DIR}/known_hosts"
+  chmod 0600 "${ASSET_CONFIG_DIR}/known_hosts"
+
+  config_identity=$(printf '%q' "${EASYTIER_SSH_IDENTITY_FILE}")
+  umask 077
+  cat > "${ASSET_CONFIG_DIR}/config" <<EOF
+SSH_USER=$(printf '%q' "${EASYTIER_SSH_USER}")
+SSH_PORT=$(printf '%q' "${EASYTIER_SSH_PORT}")
+SSH_IDENTITY_FILE=${config_identity}
+EOF
+  chmod 0600 "${ASSET_CONFIG_DIR}/config"
+
+  skill_dir="${EASYTIER_CODEX_SKILLS_DIR}/easytier-fleet-ssh"
+  install -d -m 0755 "${skill_dir}/agents" "${skill_dir}/scripts"
+  install -m 0644 "${temp_dir}/SKILL.md" "${skill_dir}/SKILL.md"
+  install -m 0644 "${temp_dir}/openai.yaml" "${skill_dir}/agents/openai.yaml"
+  install -m 0755 "${temp_dir}/refresh-assets.sh" "${skill_dir}/scripts/refresh-assets.sh"
+  install -m 0755 "${temp_dir}/et-ssh" "${skill_dir}/scripts/et-ssh"
+
+  if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    cat > /etc/systemd/system/easytier-assets-refresh.service <<EOF
+[Unit]
+Description=Refresh the local EasyTier node asset inventory
+After=${SERVICE_NAME}.service
+Requires=${SERVICE_NAME}.service
+
+[Service]
+Type=oneshot
+ExecStart=${ASSET_REFRESH_BIN}
+EOF
+    cat > /etc/systemd/system/easytier-assets-refresh.timer <<'EOF'
+[Unit]
+Description=Refresh the EasyTier node asset inventory every minute
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=60s
+AccuracySec=10s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+    systemctl daemon-reload
+    systemctl enable --now easytier-assets-refresh.timer
+  elif command -v rc-service >/dev/null 2>&1; then
+    cat > /usr/local/sbin/easytier-assets-loop <<EOF
+#!/bin/sh
+while true; do
+  ${ASSET_REFRESH_BIN} >/dev/null 2>&1 || true
+  sleep 60
+done
+EOF
+    chmod 0755 /usr/local/sbin/easytier-assets-loop
+    cat > /etc/init.d/easytier-assets <<'EOF'
+#!/sbin/openrc-run
+description="Refresh the local EasyTier asset inventory"
+supervisor=supervise-daemon
+command="/usr/local/sbin/easytier-assets-loop"
+command_user="root"
+pidfile="/run/easytier-assets.pid"
+
+depend() {
+  need easytier
+}
+EOF
+    chmod 0755 /etc/init.d/easytier-assets
+    rc-update add easytier-assets default >/dev/null 2>&1 || true
+    rc-service easytier-assets restart || rc-service easytier-assets start
+  fi
+
+  rm -rf -- "${temp_dir}"
+  trap - RETURN
+}
+
 install_service() {
   if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
     cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
@@ -393,6 +506,10 @@ main() {
   install_firewall_helper
   install_service
   verify_node
+  install_asset_management
+  "${ASSET_REFRESH_BIN}" >/dev/null
+  log "local assets: ${ASSET_DATA_DIR}/NODES.md"
+  log "SSH helper: et-ssh list"
 }
 
 main "$@"

@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+asset_dir=${EASYTIER_ASSET_DIR:-/var/lib/easytier-assets}
+inventory_file=${EASYTIER_INVENTORY_FILE:-${asset_dir}/nodes.json}
+markdown_file=${EASYTIER_MARKDOWN_FILE:-${asset_dir}/NODES.md}
+known_hosts=${EASYTIER_KNOWN_HOSTS:-/etc/easytier-assets/known_hosts}
+refresh_command=${EASYTIER_REFRESH_COMMAND:-/usr/local/sbin/easytier-assets-refresh}
+audit_file=${EASYTIER_SSH_AUDIT_FILE:-/var/log/easytier-assets/ssh-audit.jsonl}
+
+usage() {
+  cat <<'EOF'
+Usage:
+  et-ssh list
+  et-ssh refresh
+  et-ssh trust <alias|overlay-ip> <SHA256:fingerprint>
+  et-ssh connect <alias|overlay-ip>
+  et-ssh exec <alias|overlay-ip> <command...>
+EOF
+}
+
+fail() {
+  echo "Error: $*" >&2
+  exit 1
+}
+
+refresh_inventory() {
+  "${refresh_command}" >/dev/null
+}
+
+resolve_node() {
+  local target=$1
+  local matches
+  matches=$(jq --arg target "${target}" '[.nodes[] | select(.alias == $target or .overlay_ip == $target)]' "${inventory_file}")
+  [ "$(jq 'length' <<<"${matches}")" -eq 1 ] || fail "target is missing or ambiguous: ${target}"
+  jq -c '.[0]' <<<"${matches}"
+}
+
+host_lookup() {
+  local ip=$1
+  local port=$2
+  if [ "${port}" = "22" ]; then
+    printf '%s' "${ip}"
+  else
+    printf '[%s]:%s' "${ip}" "${port}"
+  fi
+}
+
+audit() {
+  local action=$1 target=$2 ip=$3
+  install -d -m 0700 "$(dirname "${audit_file}")"
+  jq -nc --arg time "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+    --arg action "${action}" --arg target "${target}" --arg ip "${ip}" \
+    '{time:$time,action:$action,target:$target,overlay_ip:$ip}' >> "${audit_file}"
+  chmod 0600 "${audit_file}"
+}
+
+ssh_args_for_node() {
+  local node=$1
+  local ip user port identity lookup
+  ip=$(jq -r '.overlay_ip' <<<"${node}")
+  user=$(jq -r '.ssh_user // "root"' <<<"${node}")
+  port=$(jq -r '.ssh_port // 22' <<<"${node}")
+  identity=$(jq -r '.ssh_identity_file // ""' <<<"${node}")
+  lookup=$(host_lookup "${ip}" "${port}")
+  ssh-keygen -F "${lookup}" -f "${known_hosts}" >/dev/null 2>&1 || \
+    fail "SSH host key is not trusted; obtain the expected fingerprint and run: et-ssh trust ${ip} SHA256:..."
+
+  SSH_ARGS=(-o "UserKnownHostsFile=${known_hosts}" -o StrictHostKeyChecking=yes -p "${port}")
+  if [ -n "${identity}" ]; then
+    SSH_ARGS+=(-i "${identity}" -o IdentitiesOnly=yes)
+  fi
+  SSH_DESTINATION="${user}@${ip}"
+}
+
+command_name=${1:-}
+case "${command_name}" in
+  list)
+    [ "$#" -eq 1 ] || { usage >&2; exit 1; }
+    refresh_inventory
+    cat "${markdown_file}"
+    ;;
+  refresh)
+    [ "$#" -eq 1 ] || { usage >&2; exit 1; }
+    "${refresh_command}"
+    ;;
+  trust)
+    [ "$#" -eq 3 ] || { usage >&2; exit 1; }
+    target=$2
+    expected=$3
+    [[ "${expected}" == SHA256:* ]] || fail "expected fingerprint must start with SHA256:"
+    refresh_inventory
+    node=$(resolve_node "${target}")
+    [ "$(jq -r '.status' <<<"${node}")" = "online" ] || fail "target is offline: ${target}"
+    ip=$(jq -r '.overlay_ip' <<<"${node}")
+    port=$(jq -r '.ssh_port // 22' <<<"${node}")
+    lookup=$(host_lookup "${ip}" "${port}")
+    temp_file=$(mktemp)
+    trap 'rm -f -- "${temp_file}"' EXIT
+    ssh-keyscan -T 5 -p "${port}" "${ip}" > "${temp_file}" 2>/dev/null || fail "unable to scan SSH host key for ${target}"
+    ssh-keygen -lf "${temp_file}" | awk '{print $2}' | grep -Fx "${expected}" >/dev/null || \
+      fail "scanned SSH host key does not match the expected fingerprint"
+    install -d -m 0700 "$(dirname "${known_hosts}")"
+    touch "${known_hosts}"
+    chmod 0600 "${known_hosts}"
+    ssh-keygen -R "${lookup}" -f "${known_hosts}" >/dev/null 2>&1 || true
+    cat "${temp_file}" >> "${known_hosts}"
+    audit "trust" "${target}" "${ip}"
+    refresh_inventory
+    echo "Trusted ${target} (${ip}) as ${expected}"
+    ;;
+  connect|exec)
+    if [ "${command_name}" = "connect" ]; then
+      [ "$#" -eq 2 ] || { usage >&2; exit 1; }
+    else
+      [ "$#" -ge 3 ] || { usage >&2; exit 1; }
+    fi
+    target=$2
+    refresh_inventory
+    node=$(resolve_node "${target}")
+    [ "$(jq -r '.status' <<<"${node}")" = "online" ] || fail "target is offline: ${target}"
+    ip=$(jq -r '.overlay_ip' <<<"${node}")
+    ssh_args_for_node "${node}"
+    audit "${command_name}" "${target}" "${ip}"
+    if [ "${command_name}" = "connect" ]; then
+      exec ssh "${SSH_ARGS[@]}" "${SSH_DESTINATION}"
+    else
+      shift 2
+      exec ssh "${SSH_ARGS[@]}" "${SSH_DESTINATION}" "$@"
+    fi
+    ;;
+  -h|--help|help)
+    usage
+    ;;
+  *)
+    usage >&2
+    exit 1
+    ;;
+esac

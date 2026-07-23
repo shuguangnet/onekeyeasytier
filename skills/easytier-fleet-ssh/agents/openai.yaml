@@ -1,0 +1,4 @@
+interface:
+  display_name: "EasyTier Fleet SSH"
+  short_description: "Discover EasyTier nodes and SSH by trusted alias"
+  default_prompt: "Use $easytier-fleet-ssh to refresh the local EasyTier inventory and connect to a trusted node by alias."

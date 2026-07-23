@@ -183,7 +183,6 @@ read_network_secret() {
     printf '\n' >/dev/tty
   fi
 
-  [ "${#EASYTIER_NETWORK_SECRET}" -ge 16 ] || fail "network secret must contain at least 16 characters"
   validate_value "network secret" "${EASYTIER_NETWORK_SECRET}"
 
   if [ ! -f "${EASYTIER_SECRET_FILE}" ]; then

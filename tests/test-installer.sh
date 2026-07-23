@@ -15,6 +15,11 @@ grep -q 'DEFAULT_PEER="tcp://tcc.933999.xyz:11010"' "${installer}"
 grep -q 'iptables -C INPUT -i tun0' "${installer}"
 grep -q 'install_asset_management' "${installer}"
 
+if grep -Eq 'network secret must contain at least|#EASYTIER_NETWORK_SECRET.*-(ge|gt)' "${installer}"; then
+  echo "A network secret length restriction was found." >&2
+  exit 1
+fi
+
 if grep -Eq 'network_secret[[:space:]]*=[[:space:]]*"[^$]' "${installer}"; then
   echo "A hard-coded network secret was found." >&2
   exit 1

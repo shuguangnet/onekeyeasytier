@@ -30,7 +30,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/shuguangnet/onekeyeasytier/m
 脚本默认连接自建服务节点 `tcp://tcc.933999.xyz:11010`，加入网络 `hostdzire`，
 并通过 EasyTier DHCP 自动获得 `10.126.126.0/24` 网段地址。首次运行会隐藏读取
 网络密钥，并保存到权限为 `0600` 的 `/etc/easytier/network.secret`；以后重复运行
-同一条命令即可更新或修复节点。
+同一条命令即可更新或修复节点。网络密钥不限制字符数量，但不能为空，并且所有
+节点必须使用完全相同的值。
 
 安装器会完成：
 

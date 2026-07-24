@@ -22,6 +22,10 @@ ALIAS_PATH="/usr/local/bin/et"
 MANAGER_INSTALL_DIR="${EASYTIER_MANAGER_INSTALL_DIR:-/usr/local/libexec}"
 MANAGER_INSTALL_PATH="${MANAGER_INSTALL_DIR}/easytier-manager.sh"
 MANAGER_SOURCE_URL="${EASYTIER_MANAGER_SOURCE_URL:-https://raw.githubusercontent.com/shuguangnet/onekeyeasytier/main/easytier.sh}"
+EXIT_ROUTE_HELPER="${CONFIG_DIR}/exit-route-helper.sh"
+EXIT_ROUTE_PEERS_FILE="${CONFIG_DIR}/exit-route-peers"
+EXIT_ROUTE_PREVIOUS_FILE="${CONFIG_DIR}/exit-route-previous-disable-p2p"
+EXIT_ROUTE_PREVIOUS_ROUTES_FILE="${CONFIG_DIR}/exit-route-previous-routes"
 
 # --- 平台特定变量 (将在 main 函数中设置) ---
 OS_TYPE=""
@@ -226,7 +230,12 @@ commit_config_file() {
 	install -m 600 "$candidate" "$CONFIG_FILE" || return 1
 	echo -e "${GREEN}配置已更新，备份文件：${backup_file}${NC}"
 	if [ -f "$SERVICE_FILE" ]; then
-		restart_service
+		if ! restart_service; then
+			echo -e "${RED}服务重启失败，正在恢复原配置。${NC}"
+			install -m 600 "$backup_file" "$CONFIG_FILE" || return 1
+			restart_service >/dev/null 2>&1 || true
+			return 1
+		fi
 		echo -e "${GREEN}EasyTier 服务已重启。${NC}"
 	fi
 }
@@ -324,6 +333,198 @@ list_exit_nodes() {
 	printf '%s\n' "$value" | tr ',' '\n' | sed -E 's/^[[:space:]\"]+//; s/[[:space:]\"]+$//' | sed '/^$/d'
 }
 
+exit_routes_enabled() {
+	local file="${1:-$CONFIG_FILE}" routes
+	routes=$(get_top_level_toml_value "routes" "$file")
+	[[ "$routes" == *'"0.0.0.0/1"'* && "$routes" == *'"128.0.0.0/1"'* ]]
+}
+
+peer_uri_host() {
+	local uri="$1" authority host
+	authority=${uri#*://}
+	authority=${authority%%/*}
+	authority=${authority##*@}
+	if [[ "$authority" == \[*\]* ]]; then
+		host=${authority#\[}
+		host=${host%%\]*}
+	else
+		host=${authority%:*}
+	fi
+	printf '%s\n' "$host"
+}
+
+resolve_ipv4_host() {
+	local host="$1"
+	if valid_ipv4 "$host"; then
+		printf '%s\n' "$host"
+		return 0
+	fi
+	if command -v getent >/dev/null 2>&1; then
+		getent ahostsv4 "$host" 2>/dev/null | awk '{print $1}' | awk '!seen[$0]++'
+	elif command -v dscacheutil >/dev/null 2>&1; then
+		dscacheutil -q host -a name "$host" 2>/dev/null | awk '/ip_address:/ {print $2}' | awk '!seen[$0]++'
+	elif command -v dig >/dev/null 2>&1; then
+		dig +short A "$host" 2>/dev/null | awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/' | awk '!seen[$0]++'
+	else
+		nslookup "$host" 2>/dev/null | awk '/^Address: / {print $2}' | awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/' | awk '!seen[$0]++'
+	fi
+}
+
+collect_peer_bypass_ipv4s() {
+	local uri host resolved found=0
+	while IFS=$'\t' read -r _ uri; do
+		[ -n "$uri" ] || continue
+		host=$(peer_uri_host "$uri")
+		[ -n "$host" ] || continue
+		resolved=$(resolve_ipv4_host "$host")
+		if [ -z "$resolved" ]; then
+			echo -e "${RED}无法解析 Peer 主机的 IPv4 地址：${host}${NC}" >&2
+			return 1
+		fi
+		printf '%s\n' "$resolved"
+		found=1
+	done < <(list_peers "$CONFIG_FILE")
+	[ "$found" -eq 1 ] || {
+		echo -e "${RED}出口模式至少需要一个可解析 IPv4 的 Peer 配置。${NC}" >&2
+		return 1
+	}
+}
+
+write_exit_route_state() {
+	local previous previous_routes bypasses bypass_file previous_file
+	bypass_file=$(mktemp) || return 1
+	if ! bypasses=$(collect_peer_bypass_ipv4s) || [ -z "$bypasses" ]; then
+		rm -f "$bypass_file"
+		return 1
+	fi
+	printf '%s\n' "$bypasses" | awk '!seen[$0]++' > "$bypass_file"
+	install -d -m 0700 "$CONFIG_DIR"
+	install -m 0600 "$bypass_file" "$EXIT_ROUTE_PEERS_FILE" || { rm -f "$bypass_file"; return 1; }
+	rm -f "$bypass_file"
+	if [ ! -f "$EXIT_ROUTE_PREVIOUS_FILE" ]; then
+		previous=$(get_toml_value "disable_p2p" "$CONFIG_FILE")
+		case "$previous" in true|false) ;; *) previous=false ;; esac
+		previous_file=$(mktemp) || return 1
+		printf '%s\n' "$previous" > "$previous_file"
+		install -m 0600 "$previous_file" "$EXIT_ROUTE_PREVIOUS_FILE" || { rm -f "$previous_file"; return 1; }
+		rm -f "$previous_file"
+		previous_routes=$(get_top_level_toml_value "routes" "$CONFIG_FILE")
+		previous_routes=${previous_routes:-[]}
+		previous_file=$(mktemp) || return 1
+		printf '%s\n' "$previous_routes" > "$previous_file"
+		install -m 0600 "$previous_file" "$EXIT_ROUTE_PREVIOUS_ROUTES_FILE" || { rm -f "$previous_file"; return 1; }
+		rm -f "$previous_file"
+	fi
+}
+
+create_exit_route_helper() {
+	local temp_file
+	install -d -m 0700 "$CONFIG_DIR"
+	temp_file=$(mktemp) || return 1
+	cat > "$temp_file" << EOF
+#!/bin/bash
+set -u
+PEERS_FILE="${EXIT_ROUTE_PEERS_FILE}"
+CORE_BINARY="${INSTALL_DIR}/${CORE_BINARY_NAME}"
+CONFIG_FILE="${CONFIG_FILE}"
+
+valid_ipv4() {
+	local ip="\$1"
+	awk -v ip="\$ip" 'BEGIN {
+		if (ip !~ /^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+\$/) exit 1
+		n = split(ip, octet, ".")
+		for (i = 1; i <= 4; i++) if (octet[i] < 0 || octet[i] > 255) exit 1
+	}'
+}
+
+reset_exit_route_state() {
+	[ -x "$EXIT_ROUTE_HELPER" ] && "$EXIT_ROUTE_HELPER" cleanup || true
+	rm -f "$EXIT_ROUTE_PEERS_FILE" "$EXIT_ROUTE_PREVIOUS_FILE" "$EXIT_ROUTE_PREVIOUS_ROUTES_FILE"
+}
+
+require_direct_mode_for_peer_change() {
+	if exit_routes_enabled "$CONFIG_FILE" || [ -n "$(list_exit_nodes "$CONFIG_FILE")" ]; then
+		echo -e "${RED}出口模式下不能修改 Peer。请先在出口管理中恢复直连。${NC}"
+		return 1
+	fi
+}
+
+linux_default_route() {
+	ip -4 route show default 2>/dev/null | head -n 1
+}
+
+prepare_linux() {
+	local route_line gateway iface ip
+	route_line=\$(linux_default_route)
+	[ -n "\$route_line" ] || { echo "EasyTier exit route: no IPv4 default route" >&2; return 1; }
+	gateway=\$(awk '{for (i=1;i<=NF;i++) if (\$i=="via") print \$(i+1)}' <<< "\$route_line")
+	iface=\$(awk '{for (i=1;i<=NF;i++) if (\$i=="dev") print \$(i+1)}' <<< "\$route_line")
+	[ -n "\$iface" ] || return 1
+	while IFS= read -r ip; do
+		valid_ipv4 "\$ip" || continue
+		if [ -n "\$gateway" ]; then
+			ip route replace "\$ip/32" via "\$gateway" dev "\$iface" metric 5
+		else
+			ip route replace "\$ip/32" dev "\$iface" metric 5
+		fi
+	done < "\$PEERS_FILE"
+}
+
+cleanup_linux() {
+	local ip
+	while IFS= read -r ip; do
+		valid_ipv4 "\$ip" || continue
+		ip route del "\$ip/32" 2>/dev/null || true
+	done < "\$PEERS_FILE"
+}
+
+prepare_macos() {
+	local gateway ip
+	gateway=\$(route -n get default 2>/dev/null | awk '/gateway:/ {print \$2; exit}')
+	[ -n "\$gateway" ] || { echo "EasyTier exit route: no IPv4 default gateway" >&2; return 1; }
+	while IFS= read -r ip; do
+		valid_ipv4 "\$ip" || continue
+		route -n add -host "\$ip" "\$gateway" >/dev/null 2>&1 || \
+			route -n change -host "\$ip" "\$gateway" >/dev/null
+	done < "\$PEERS_FILE"
+}
+
+cleanup_macos() {
+	local ip
+	while IFS= read -r ip; do
+		valid_ipv4 "\$ip" || continue
+		route -n delete -host "\$ip" >/dev/null 2>&1 || true
+	done < "\$PEERS_FILE"
+}
+
+prepare() {
+	[ -s "\$PEERS_FILE" ] || return 0
+	case "\$(uname)" in
+		Darwin) prepare_macos ;;
+		Linux) prepare_linux ;;
+		*) echo "EasyTier exit route: unsupported OS" >&2; return 1 ;;
+	esac
+}
+
+cleanup() {
+	[ -s "\$PEERS_FILE" ] || return 0
+	case "\$(uname)" in
+		Darwin) cleanup_macos ;;
+		Linux) cleanup_linux ;;
+	esac
+}
+
+case "\${1:-}" in
+	prepare) prepare ;;
+	cleanup) cleanup ;;
+	run) prepare && exec "\$CORE_BINARY" -c "\$CONFIG_FILE" ;;
+	*) echo "Usage: \$0 {prepare|cleanup|run}" >&2; exit 2 ;;
+esac
+EOF
+	install -m 0700 "$temp_file" "$EXIT_ROUTE_HELPER"
+	rm -f "$temp_file"
+}
+
 show_config() {
 	[ -f "$CONFIG_FILE" ] || { echo -e "${YELLOW}配置文件不存在。${NC}"; return 1; }
 	sed -E 's/^([[:space:]]*network_secret[[:space:]]*=[[:space:]]*).*/\1"***"/' "$CONFIG_FILE"
@@ -332,6 +533,7 @@ show_config() {
 # --- 平台相关的服务管理功能 ---
 
 create_service_file() {
+    create_exit_route_helper || return 1
     if [[ "$OS_TYPE" == "macos" || "$OS_TYPE" == "alpine" ]]; then
         touch "$LOG_FILE"
         chown root:root "$LOG_FILE" &>/dev/null
@@ -347,7 +549,9 @@ After=network.target
 [Service]
 Type=simple
 User=root
+ExecStartPre=${EXIT_ROUTE_HELPER} prepare
 ExecStart=${INSTALL_DIR}/${CORE_BINARY_NAME} -c ${CONFIG_FILE}
+ExecStopPost=${EXIT_ROUTE_HELPER} cleanup
 # 使用 "always" 策略确保进程无论如何退出都会被重启，提供最强的守护
 Restart=always
 RestartSec=5s
@@ -367,6 +571,12 @@ command_user="root"
 pidfile="/var/run/${SERVICE_NAME}.pid"
 output_log="${LOG_FILE}"
 error_log="${LOG_FILE}"
+start_pre() {
+	${EXIT_ROUTE_HELPER} prepare
+}
+stop_post() {
+	${EXIT_ROUTE_HELPER} cleanup
+}
 depend() {
 	need net
 	after net
@@ -383,9 +593,8 @@ EOL
     <string>${SERVICE_LABEL}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>${INSTALL_DIR}/${CORE_BINARY_NAME}</string>
-        <string>-c</string>
-        <string>${CONFIG_FILE}</string>
+		<string>${EXIT_ROUTE_HELPER}</string>
+		<string>run</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -506,12 +715,14 @@ install_easytier() {
 create_default_config() {
 	local instance_name
 	instance_name=$(toml_escape "$(hostname)")
+	reset_exit_route_state
 	mkdir -p "$CONFIG_DIR"; umask 077; cat > "$CONFIG_FILE" << EOF
 instance_name = "${instance_name}"
 hostname = "${instance_name}"
 ipv4 = ""
 dhcp = false
 exit_nodes = []
+routes = []
 listeners = ["udp://0.0.0.0:11010", "tcp://0.0.0.0:11010", "wg://0.0.0.0:11011", "ws://0.0.0.0:11011/", "wss://0.0.0.0:11012/", "tcp://[::]:11010", "udp://[::]:11010"]
 [network_identity]
 network_name = ""
@@ -700,6 +911,7 @@ show_peer_list() {
 add_peer_config() {
 	local uri temp_file result
 	[ -f "$CONFIG_FILE" ] || { echo -e "${YELLOW}配置文件不存在，请先部署或加入网络。${NC}"; return 1; }
+	require_direct_mode_for_peer_change || return 1
 	read -r -p "请输入 Peer 地址: " uri
 	valid_peer_uri "$uri" || { echo -e "${RED}Peer 地址必须以 tcp://、udp://、wg://、ws:// 或 wss:// 开头。${NC}"; return 1; }
 	temp_file=$(mktemp); cp -p "$CONFIG_FILE" "$temp_file"
@@ -712,6 +924,7 @@ add_peer_config() {
 update_peer_config() {
 	local index uri count temp_file result
 	[ -f "$CONFIG_FILE" ] || { echo -e "${YELLOW}配置文件不存在，请先部署或加入网络。${NC}"; return 1; }
+	require_direct_mode_for_peer_change || return 1
 	show_peer_list || return 1
 	count=$(list_peers "$CONFIG_FILE" | wc -l | tr -d ' ')
 	read -r -p "请输入要修改的节点编号: " index
@@ -728,6 +941,7 @@ update_peer_config() {
 delete_peer_config() {
 	local index count confirm temp_file result
 	[ -f "$CONFIG_FILE" ] || { echo -e "${YELLOW}配置文件不存在。${NC}"; return 1; }
+	require_direct_mode_for_peer_change || return 1
 	show_peer_list || return 1
 	count=$(list_peers "$CONFIG_FILE" | wc -l | tr -d ' ')
 	read -r -p "请输入要删除的节点编号: " index
@@ -749,6 +963,7 @@ delete_network_config() {
 	backup_file=$(mktemp "${CONFIG_FILE}.deleted.XXXXXX") || return 1
 	cp -p "$CONFIG_FILE" "$backup_file" || { rm -f "$backup_file"; return 1; }
 	stop_service >/dev/null 2>&1 || true
+	reset_exit_route_state
 	rm -f "$CONFIG_FILE"
 	echo -e "${GREEN}配置已删除，服务已停止。备份文件：${backup_file}${NC}"
 }
@@ -770,6 +985,11 @@ show_exit_node_status() {
 			printf ' %d. %s\n' "$index" "$node"
 			index=$((index + 1))
 		done <<< "$selected"
+		if exit_routes_enabled "$CONFIG_FILE" && [ -s "$EXIT_ROUTE_PEERS_FILE" ]; then
+			echo -e "全局 IPv4 路由: ${GREEN}已启用${NC}"
+		else
+			echo -e "全局 IPv4 路由: ${RED}未完整启用，请重新选择出口${NC}"
+		fi
 	else
 		echo "本机流量出口: 直连"
 	fi
@@ -782,6 +1002,39 @@ show_exit_node_candidates() {
 	fi
 	echo "在线节点如下；请选择具有公网访问能力且已启用出口的节点虚拟 IPv4："
 	"${INSTALL_DIR}/${CLI_BINARY_NAME}" peer
+}
+
+verify_exit_node() {
+	local public_ip ip
+	[ -f "$CONFIG_FILE" ] || { echo -e "${YELLOW}配置文件不存在。${NC}"; return 1; }
+	if [ -z "$(list_exit_nodes "$CONFIG_FILE")" ] || ! exit_routes_enabled "$CONFIG_FILE"; then
+		echo -e "${YELLOW}当前未启用完整的全局 IPv4 出口。${NC}"
+		return 1
+	fi
+	echo "公网测试目标路由："
+	if [[ "$OS_TYPE" == "macos" ]]; then
+		route -n get 1.1.1.1 2>/dev/null | awk '/gateway:|interface:|flags:/ {print}' || true
+	else
+		ip -4 route get 1.1.1.1 2>/dev/null || true
+	fi
+	if [ -s "$EXIT_ROUTE_PEERS_FILE" ]; then
+		echo "EasyTier Peer 公网地址绕行路由："
+		while IFS= read -r ip; do
+			if [[ "$OS_TYPE" == "macos" ]]; then
+				route -n get "$ip" 2>/dev/null | awk -v ip="$ip" 'BEGIN {print "Peer " ip} /gateway:|interface:/ {print}' || true
+			else
+				ip -4 route get "$ip" 2>/dev/null || true
+			fi
+		done < "$EXIT_ROUTE_PEERS_FILE"
+	fi
+	public_ip=$(curl -4 -fsS --max-time 10 https://api.ipify.org 2>/dev/null || true)
+	if valid_ipv4 "$public_ip"; then
+		echo -e "当前 IPv4 公网地址: ${GREEN}${public_ip}${NC}"
+		return 0
+	fi
+	echo -e "${RED}无法通过当前出口访问 IPv4 互联网。${NC}"
+	echo "可选择“恢复直连”，再检查出口节点和 Peer 连通性。"
+	return 1
 }
 
 set_local_exit_node_enabled() {
@@ -800,7 +1053,7 @@ set_local_exit_node_enabled() {
 }
 
 select_exit_nodes() {
-	local input value temp_file result confirm
+	local input value temp_file result confirm had_state=0
 	[ -f "$CONFIG_FILE" ] || { echo -e "${YELLOW}配置文件不存在。${NC}"; return 1; }
 	show_exit_node_candidates || true
 	echo "可输入多个虚拟 IPv4，用空格或逗号分隔；前面的优先级更高。"
@@ -814,15 +1067,43 @@ select_exit_nodes() {
 	[[ "$confirm" =~ ^[Yy]$ ]] || { echo "操作已取消。"; return 0; }
 	temp_file=$(mktemp); cp -p "$CONFIG_FILE" "$temp_file"
 	set_top_level_toml_value "exit_nodes" "$value" "$temp_file"
+	set_top_level_toml_value "routes" '["0.0.0.0/1", "128.0.0.0/1"]' "$temp_file"
+	set_toml_value "disable_p2p" "true" "$temp_file"
+	if ! validate_config_file "$temp_file"; then
+		echo -e "${RED}出口配置校验失败，原配置未修改。${NC}"
+		rm -f "$temp_file"
+		return 1
+	fi
+	[ -f "$EXIT_ROUTE_PREVIOUS_FILE" ] && had_state=1
+	if ! write_exit_route_state; then
+		echo -e "${RED}无法为 Peer 创建物理网关绕行路由，出口未启用。${NC}"
+		rm -f "$temp_file"
+		return 1
+	fi
+	if ! create_service_file; then
+		echo -e "${RED}无法更新服务定义，出口未启用。${NC}"
+		[ "$had_state" -eq 1 ] || rm -f "$EXIT_ROUTE_PEERS_FILE" "$EXIT_ROUTE_PREVIOUS_FILE" "$EXIT_ROUTE_PREVIOUS_ROUTES_FILE"
+		rm -f "$temp_file"
+		return 1
+	fi
+	reload_service_daemon
 	commit_config_file "$temp_file"; result=$?
+	if [ "$result" -ne 0 ] && [ "$had_state" -eq 0 ]; then
+		rm -f "$EXIT_ROUTE_PEERS_FILE" "$EXIT_ROUTE_PREVIOUS_FILE" "$EXIT_ROUTE_PREVIOUS_ROUTES_FILE"
+	fi
 	rm -f "$temp_file"
+	if [ "$result" -eq 0 ]; then
+		echo -e "${GREEN}全局 IPv4 出口已启用；动态 P2P 已关闭以避免公网端点路由回环。${NC}"
+		sleep 2
+		verify_exit_node || true
+	fi
 	return "$result"
 }
 
 clear_exit_nodes() {
-	local temp_file result confirm
+	local temp_file result confirm previous=false previous_routes='[]'
 	[ -f "$CONFIG_FILE" ] || { echo -e "${YELLOW}配置文件不存在。${NC}"; return 1; }
-	if [ -z "$(list_exit_nodes "$CONFIG_FILE")" ]; then
+	if [ -z "$(list_exit_nodes "$CONFIG_FILE")" ] && ! exit_routes_enabled "$CONFIG_FILE"; then
 		echo "当前已经是直连模式。"
 		return 0
 	fi
@@ -830,8 +1111,21 @@ clear_exit_nodes() {
 	[[ "$confirm" =~ ^[Yy]$ ]] || { echo "操作已取消。"; return 0; }
 	temp_file=$(mktemp); cp -p "$CONFIG_FILE" "$temp_file"
 	set_top_level_toml_value "exit_nodes" "[]" "$temp_file"
+	if [ -f "$EXIT_ROUTE_PREVIOUS_ROUTES_FILE" ]; then
+		previous_routes=$(head -n 1 "$EXIT_ROUTE_PREVIOUS_ROUTES_FILE")
+	fi
+	set_top_level_toml_value "routes" "$previous_routes" "$temp_file"
+	if [ -f "$EXIT_ROUTE_PREVIOUS_FILE" ]; then
+		previous=$(head -n 1 "$EXIT_ROUTE_PREVIOUS_FILE")
+	fi
+	case "$previous" in true|false) ;; *) previous=false ;; esac
+	set_toml_value "disable_p2p" "$previous" "$temp_file"
 	commit_config_file "$temp_file"; result=$?
 	rm -f "$temp_file"
+	if [ "$result" -eq 0 ]; then
+		reset_exit_route_state
+		echo -e "${GREEN}已恢复直连，并还原 P2P 设置。${NC}"
+	fi
 	return "$result"
 }
 
@@ -845,14 +1139,16 @@ manage_exit_nodes() {
 		echo " 3. 恢复直连"
 		echo " 4. 允许本机作为出口节点"
 		echo " 5. 禁止本机作为出口节点"
+		echo " 6. 验证当前出口与路由"
 		echo " 0. 返回"
-		read -r -p "请输入选项 [0-5]: " exit_choice
+		read -r -p "请输入选项 [0-6]: " exit_choice
 		case "$exit_choice" in
 			1) show_exit_node_candidates || true ;;
 			2) select_exit_nodes ;;
 			3) clear_exit_nodes ;;
 			4) set_local_exit_node_enabled true ;;
 			5) set_local_exit_node_enabled false ;;
+			6) verify_exit_node ;;
 			0) return 0 ;;
 			*) echo -e "${RED}无效输入。${NC}" ;;
 		esac
@@ -887,7 +1183,7 @@ manage_config() {
 
 manage_service() { check_installed || return 1; PS3="请选择操作: "; options=("启动" "停止" "重启" "状态" "设为开机自启" "取消开机自启" "查看日志" "返回"); select opt in "${options[@]}"; do case $opt in "启动") start_service && echo -e "${GREEN}服务已启动。${NC}"; break ;; "停止") stop_service && echo -e "${GREEN}服务已停止。${NC}"; break ;; "重启") restart_service && echo -e "${GREEN}服务已重启。${NC}"; break ;; "状态") status_service; break ;; "设为开机自启") enable_service; break ;; "取消开机自启") disable_service; break ;; "查看日志") log_service; break ;; "返回") break ;; esac; done; }
 
-uninstall_easytier() { read -p "警告: 此操作将停止服务并删除所有相关文件。确定要卸载吗? (y/n): " confirm; if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then echo "操作已取消。"; return; fi; echo "正在停止并禁用服务..."; stop_service &> /dev/null; disable_service &> /dev/null; echo "正在删除文件..."; rm -f "${SERVICE_FILE}" "${INSTALL_DIR}/${CORE_BINARY_NAME}" "${INSTALL_DIR}/${CLI_BINARY_NAME}"; rm -rf "${CONFIG_DIR}"; remove_shortcut; if [[ "$OS_TYPE" == "linux" ]]; then systemctl daemon-reload; fi; if [[ "$OS_TYPE" == "macos" || "$OS_TYPE" == "alpine" ]]; then rm -f "$LOG_FILE"; fi; echo -e "${GREEN}EasyTier 已成功卸载。${NC}"; }
+uninstall_easytier() { read -p "警告: 此操作将停止服务并删除所有相关文件。确定要卸载吗? (y/n): " confirm; if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then echo "操作已取消。"; return; fi; echo "正在停止并禁用服务..."; stop_service &> /dev/null; disable_service &> /dev/null; reset_exit_route_state; echo "正在删除文件..."; rm -f "${SERVICE_FILE}" "${INSTALL_DIR}/${CORE_BINARY_NAME}" "${INSTALL_DIR}/${CLI_BINARY_NAME}"; rm -rf "${CONFIG_DIR}"; remove_shortcut; if [[ "$OS_TYPE" == "linux" ]]; then systemctl daemon-reload; fi; if [[ "$OS_TYPE" == "macos" || "$OS_TYPE" == "alpine" ]]; then rm -f "$LOG_FILE"; fi; echo -e "${GREEN}EasyTier 已成功卸载。${NC}"; }
 
 # --- 主菜单 ---
 main() {

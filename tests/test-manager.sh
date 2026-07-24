@@ -18,7 +18,12 @@ SERVICE_FILE="${temp_dir}/easytier.service"
 MANAGER_INSTALL_DIR="${temp_dir}/libexec"
 MANAGER_INSTALL_PATH="${MANAGER_INSTALL_DIR}/easytier-manager.sh"
 ALIAS_PATH="${temp_dir}/bin/et"
+EXIT_ROUTE_HELPER="${CONFIG_DIR}/exit-route-helper.sh"
+EXIT_ROUTE_PEERS_FILE="${CONFIG_DIR}/exit-route-peers"
+EXIT_ROUTE_PREVIOUS_FILE="${CONFIG_DIR}/exit-route-previous-disable-p2p"
+EXIT_ROUTE_PREVIOUS_ROUTES_FILE="${CONFIG_DIR}/exit-route-previous-routes"
 mkdir -p "${INSTALL_DIR}" "${CONFIG_DIR}"
+restart_service() { return 0; }
 
 download_source="${temp_dir}/downloaded-manager.sh"
 cp "${manager}" "${download_source}"
@@ -103,6 +108,59 @@ set_toml_value "enable_exit_node" "true" "${CONFIG_FILE}"
 [ "$(get_toml_value "enable_exit_node" "${CONFIG_FILE}")" = "true" ]
 set_toml_value "enable_exit_node" "false" "${CONFIG_FILE}"
 
+[ "$(peer_uri_host 'tcp://seed.example:11010')" = "seed.example" ]
+[ "$(peer_uri_host 'wss://203.0.113.20:11012/path')" = "203.0.113.20" ]
+set_top_level_toml_value "routes" '["192.168.0.0/16"]' "${CONFIG_FILE}"
+resolve_ipv4_host() { printf '%s\n' "203.0.113.10"; }
+write_exit_route_state
+grep -qx '203.0.113.10' "${EXIT_ROUTE_PEERS_FILE}"
+grep -qx 'false' "${EXIT_ROUTE_PREVIOUS_FILE}"
+grep -Fqx '["192.168.0.0/16"]' "${EXIT_ROUTE_PREVIOUS_ROUTES_FILE}"
+create_exit_route_helper
+bash -n "${EXIT_ROUTE_HELPER}"
+grep -Fq 'ip route replace "$ip/32"' "${EXIT_ROUTE_HELPER}"
+fake_bin="${temp_dir}/fake-bin"
+route_log="${temp_dir}/route.log"
+mkdir -p "${fake_bin}"
+cat > "${fake_bin}/uname" <<'EOF'
+#!/usr/bin/env bash
+echo "${FAKE_UNAME:-Linux}"
+EOF
+cat > "${fake_bin}/ip" <<'EOF'
+#!/usr/bin/env bash
+if [ "$*" = "-4 route show default" ]; then
+  echo "default via 192.0.2.1 dev eth0"
+else
+  printf '%s\n' "$*" >> "${ROUTE_LOG}"
+fi
+EOF
+chmod 0755 "${fake_bin}/uname" "${fake_bin}/ip"
+ROUTE_LOG="${route_log}" PATH="${fake_bin}:${PATH}" "${EXIT_ROUTE_HELPER}" prepare
+grep -Fq 'route replace 203.0.113.10/32 via 192.0.2.1 dev eth0 metric 5' "${route_log}"
+ROUTE_LOG="${route_log}" PATH="${fake_bin}:${PATH}" "${EXIT_ROUTE_HELPER}" cleanup
+grep -Fq 'route del 203.0.113.10/32' "${route_log}"
+cat > "${fake_bin}/route" <<'EOF'
+#!/usr/bin/env bash
+if [ "$*" = "-n get default" ]; then
+  echo "   gateway: 192.0.2.1"
+  echo " interface: en0"
+else
+  printf '%s\n' "$*" >> "${ROUTE_LOG}"
+fi
+EOF
+chmod 0755 "${fake_bin}/route"
+: > "${route_log}"
+FAKE_UNAME=Darwin ROUTE_LOG="${route_log}" PATH="${fake_bin}:${PATH}" "${EXIT_ROUTE_HELPER}" prepare
+grep -Fq -- '-n add -host 203.0.113.10 192.0.2.1' "${route_log}"
+FAKE_UNAME=Darwin ROUTE_LOG="${route_log}" PATH="${fake_bin}:${PATH}" "${EXIT_ROUTE_HELPER}" cleanup
+grep -Fq -- '-n delete -host 203.0.113.10' "${route_log}"
+OS_TYPE=linux
+create_service_file >/dev/null
+grep -Fq "ExecStartPre=${EXIT_ROUTE_HELPER} prepare" "${SERVICE_FILE}"
+grep -Fq "ExecStopPost=${EXIT_ROUTE_HELPER} cleanup" "${SERVICE_FILE}"
+set_top_level_toml_value "routes" '[]' "${CONFIG_FILE}"
+rm -f "${EXIT_ROUTE_PEERS_FILE}" "${EXIT_ROUTE_PREVIOUS_FILE}" "${EXIT_ROUTE_PREVIOUS_ROUTES_FILE}"
+
 cp "${CONFIG_FILE}" "${NODE_CONFIG_FILE}"
 cat > "${SERVICE_FILE}" <<EOF
 [Service]
@@ -149,6 +207,16 @@ if commit_config_file "${candidate}"; then
   exit 1
 fi
 grep -q 'network_name = "example"' "${CONFIG_FILE}"
+
+cp -p "${CONFIG_FILE}" "${candidate}"
+set_toml_value "network_name" '"restart-failure"' "${candidate}"
+restart_service() { return 1; }
+if commit_config_file "${candidate}" >/dev/null 2>&1; then
+  echo "Configuration with a failed service restart was unexpectedly committed." >&2
+  exit 1
+fi
+grep -q 'network_name = "example"' "${CONFIG_FILE}"
+restart_service() { return 0; }
 
 rm -f "${candidate}"
 bash -n "${manager}"

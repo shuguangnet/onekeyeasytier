@@ -179,6 +179,20 @@ get_top_level_toml_string() {
 	' "$file"
 }
 
+get_top_level_toml_value() {
+	local key="$1" file="$2"
+	awk -v key="$key" '
+		/^[[:space:]]*\[/ { exit }
+		$0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+			line = $0
+			sub(/^[^=]*=[[:space:]]*/, "", line)
+			sub(/[[:space:]]*$/, "", line)
+			print line
+			exit
+		}
+	' "$file"
+}
+
 get_toml_value() {
 	local key="$1" file="$2"
 	awk -v key="$key" '
@@ -269,6 +283,45 @@ delete_peer_from_file() {
 
 valid_peer_uri() {
 	[[ "$1" =~ ^(tcp|udp|wg|ws|wss)://[^[:space:]]+$ ]]
+}
+
+valid_ipv4() {
+	local ip="$1"
+	awk -v ip="$ip" 'BEGIN {
+		if (ip !~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) exit 1
+		n = split(ip, octet, ".")
+		if (n != 4) exit 1
+		for (i = 1; i <= 4; i++) {
+			if (octet[i] !~ /^[0-9]+$/ || octet[i] < 0 || octet[i] > 255) exit 1
+		}
+		exit 0
+	}'
+}
+
+format_exit_nodes_value() {
+	local input="$1" token value="[" separator="" seen=" "
+	local tokens=()
+	input=${input//,/ }
+	read -r -a tokens <<< "$input"
+	[ "${#tokens[@]}" -gt 0 ] || return 1
+	for token in "${tokens[@]}"; do
+		valid_ipv4 "$token" || return 1
+		case "$seen" in
+			*" $token "*) continue ;;
+		esac
+		value+="${separator}\"${token}\""
+		separator=", "
+		seen+="${token} "
+	done
+	printf '%s]\n' "$value"
+}
+
+list_exit_nodes() {
+	local file="${1:-$CONFIG_FILE}" value
+	value=$(get_top_level_toml_value "exit_nodes" "$file")
+	value=${value#[}
+	value=${value%]}
+	printf '%s\n' "$value" | tr ',' '\n' | sed -E 's/^[[:space:]\"]+//; s/[[:space:]\"]+$//' | sed '/^$/d'
 }
 
 show_config() {
@@ -458,6 +511,7 @@ instance_name = "${instance_name}"
 hostname = "${instance_name}"
 ipv4 = ""
 dhcp = false
+exit_nodes = []
 listeners = ["udp://0.0.0.0:11010", "tcp://0.0.0.0:11010", "wg://0.0.0.0:11011", "ws://0.0.0.0:11011/", "wss://0.0.0.0:11012/", "tcp://[::]:11010", "udp://[::]:11010"]
 [network_identity]
 network_name = ""
@@ -699,6 +753,112 @@ delete_network_config() {
 	echo -e "${GREEN}配置已删除，服务已停止。备份文件：${backup_file}${NC}"
 }
 
+show_exit_node_status() {
+	local enabled selected index=1
+	[ -f "$CONFIG_FILE" ] || { echo -e "${YELLOW}配置文件不存在。${NC}"; return 1; }
+	enabled=$(get_toml_value "enable_exit_node" "$CONFIG_FILE")
+	selected=$(list_exit_nodes "$CONFIG_FILE")
+	echo "---------------- 出口状态 ----------------"
+	if [ "$enabled" = "true" ]; then
+		echo -e "本机提供出口: ${GREEN}已启用${NC}"
+	else
+		echo -e "本机提供出口: ${YELLOW}未启用${NC}"
+	fi
+	if [ -n "$selected" ]; then
+		echo "本机流量出口（按优先级）:"
+		while IFS= read -r node; do
+			printf ' %d. %s\n' "$index" "$node"
+			index=$((index + 1))
+		done <<< "$selected"
+	else
+		echo "本机流量出口: 直连"
+	fi
+}
+
+show_exit_node_candidates() {
+	if [ ! -x "${INSTALL_DIR}/${CLI_BINARY_NAME}" ]; then
+		echo -e "${YELLOW}未找到 easytier-cli，无法列出在线节点。${NC}"
+		return 1
+	fi
+	echo "在线节点如下；请选择具有公网访问能力且已启用出口的节点虚拟 IPv4："
+	"${INSTALL_DIR}/${CLI_BINARY_NAME}" peer
+}
+
+set_local_exit_node_enabled() {
+	local enabled="$1" temp_file result confirm
+	[ -f "$CONFIG_FILE" ] || { echo -e "${YELLOW}配置文件不存在。${NC}"; return 1; }
+	if [ "$enabled" = "true" ]; then
+		echo -e "${YELLOW}启用后，其他组网节点可通过本机公网出口访问互联网。${NC}"
+		read -r -p "确认本机允许承担出口流量? (y/N): " confirm
+		[[ "$confirm" =~ ^[Yy]$ ]] || { echo "操作已取消。"; return 0; }
+	fi
+	temp_file=$(mktemp); cp -p "$CONFIG_FILE" "$temp_file"
+	set_toml_value "enable_exit_node" "$enabled" "$temp_file"
+	commit_config_file "$temp_file"; result=$?
+	rm -f "$temp_file"
+	return "$result"
+}
+
+select_exit_nodes() {
+	local input value temp_file result confirm
+	[ -f "$CONFIG_FILE" ] || { echo -e "${YELLOW}配置文件不存在。${NC}"; return 1; }
+	show_exit_node_candidates || true
+	echo "可输入多个虚拟 IPv4，用空格或逗号分隔；前面的优先级更高。"
+	read -r -p "出口节点虚拟 IPv4: " input
+	if ! value=$(format_exit_nodes_value "$input"); then
+		echo -e "${RED}出口节点必须是有效的 IPv4 地址，且不能为空。${NC}"
+		return 1
+	fi
+	echo -e "${YELLOW}应用后本机默认互联网流量将通过所选出口，当前远程会话可能中断。${NC}"
+	read -r -p "确认切换出口? (y/N): " confirm
+	[[ "$confirm" =~ ^[Yy]$ ]] || { echo "操作已取消。"; return 0; }
+	temp_file=$(mktemp); cp -p "$CONFIG_FILE" "$temp_file"
+	set_top_level_toml_value "exit_nodes" "$value" "$temp_file"
+	commit_config_file "$temp_file"; result=$?
+	rm -f "$temp_file"
+	return "$result"
+}
+
+clear_exit_nodes() {
+	local temp_file result confirm
+	[ -f "$CONFIG_FILE" ] || { echo -e "${YELLOW}配置文件不存在。${NC}"; return 1; }
+	if [ -z "$(list_exit_nodes "$CONFIG_FILE")" ]; then
+		echo "当前已经是直连模式。"
+		return 0
+	fi
+	read -r -p "确认停用出口节点并恢复本机直连? (y/N): " confirm
+	[[ "$confirm" =~ ^[Yy]$ ]] || { echo "操作已取消。"; return 0; }
+	temp_file=$(mktemp); cp -p "$CONFIG_FILE" "$temp_file"
+	set_top_level_toml_value "exit_nodes" "[]" "$temp_file"
+	commit_config_file "$temp_file"; result=$?
+	rm -f "$temp_file"
+	return "$result"
+}
+
+manage_exit_nodes() {
+	check_installed || return 1
+	while true; do
+		show_exit_node_status || true
+		echo "--------------------------------------------"
+		echo " 1. 查看在线节点"
+		echo " 2. 选择/切换本机出口"
+		echo " 3. 恢复直连"
+		echo " 4. 允许本机作为出口节点"
+		echo " 5. 禁止本机作为出口节点"
+		echo " 0. 返回"
+		read -r -p "请输入选项 [0-5]: " exit_choice
+		case "$exit_choice" in
+			1) show_exit_node_candidates || true ;;
+			2) select_exit_nodes ;;
+			3) clear_exit_nodes ;;
+			4) set_local_exit_node_enabled true ;;
+			5) set_local_exit_node_enabled false ;;
+			0) return 0 ;;
+			*) echo -e "${RED}无效输入。${NC}" ;;
+		esac
+	done
+}
+
 manage_config() {
 	check_installed || return 1
 	while true; do
@@ -754,10 +914,11 @@ main() {
 		echo "-------------------------------------------------------"
 		echo " 8. 修改 EasyTier 节点名称 (hostname)"
 		echo " 9. 更新管理脚本"
-		echo "10. 卸载 EasyTier"
+		echo "10. 管理出口节点 (全局流量切换)"
+		echo "11. 卸载 EasyTier"
 		echo " 0. 退出脚本"
 		echo "======================================================="
-		read -p "请输入选项 [0-10]: " choice
+		read -p "请输入选项 [0-11]: " choice
 		
 		echo
 		
@@ -771,7 +932,8 @@ main() {
 			7) manage_config ;;
 			8) update_hostname ;;
 			9) update_manager_script ;;
-			10) uninstall_easytier ;;
+			10) manage_exit_nodes ;;
+			11) uninstall_easytier ;;
 			0) exit 0 ;;
 			*) echo -e "${RED}无效输入${NC}" ;;
 		esac

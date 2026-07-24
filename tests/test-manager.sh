@@ -87,6 +87,22 @@ hostname_line=$(grep -n '^hostname = ' "${CONFIG_FILE}" | cut -d: -f1)
 first_section_line=$(grep -n '^\[' "${CONFIG_FILE}" | head -n1 | cut -d: -f1)
 [ "${hostname_line}" -lt "${first_section_line}" ]
 
+set_top_level_toml_value "exit_nodes" '["10.126.126.2", "10.126.126.3"]' "${CONFIG_FILE}"
+[ "$(get_top_level_toml_value "exit_nodes" "${CONFIG_FILE}")" = '["10.126.126.2", "10.126.126.3"]' ]
+mapfile -t configured_exit_nodes < <(list_exit_nodes "${CONFIG_FILE}")
+[ "${configured_exit_nodes[0]}" = "10.126.126.2" ]
+[ "${configured_exit_nodes[1]}" = "10.126.126.3" ]
+[ "$(format_exit_nodes_value '10.126.126.2, 10.126.126.3 10.126.126.2')" = '["10.126.126.2", "10.126.126.3"]' ]
+if format_exit_nodes_value '10.126.126.2 999.1.1.1' >/dev/null; then
+  echo "Invalid exit node address was unexpectedly accepted." >&2
+  exit 1
+fi
+set_top_level_toml_value "exit_nodes" '[]' "${CONFIG_FILE}"
+[ -z "$(list_exit_nodes "${CONFIG_FILE}")" ]
+set_toml_value "enable_exit_node" "true" "${CONFIG_FILE}"
+[ "$(get_toml_value "enable_exit_node" "${CONFIG_FILE}")" = "true" ]
+set_toml_value "enable_exit_node" "false" "${CONFIG_FILE}"
+
 cp "${CONFIG_FILE}" "${NODE_CONFIG_FILE}"
 cat > "${SERVICE_FILE}" <<EOF
 [Service]
